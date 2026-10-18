@@ -318,18 +318,21 @@ def _boxes_in_render(cg, index, rects, scale):
     return out
 
 
-def _covered_print(print_doc, boxes_by_page, scale=2.0, inset=3):
-    """How many screen-only boxes sit over something in the printed view (any non-uniform pixels)."""
+def _covered_print(print_doc, boxes_by_page, scale=2.0, inset=1):
+    """How many screen-only boxes sit over something in the printed view (any non-uniform pixels).
+
+    Per colour channel, so text in a colour as bright as its background still counts. A 1 px inset
+    keeps out anti-aliasing from content that merely touches the box edge."""
     from PIL import Image
     covered = 0
     for i, rects in boxes_by_page.items():
-        img = Image.open(io.BytesIO(_render(print_doc, i, scale))).convert("L")
+        img = Image.open(io.BytesIO(_render(print_doc, i, scale))).convert("RGB")
         for l, t, r, b in _boxes_in_render(print_doc, i, rects, scale):
             l, t = max(int(l) + inset, 0), max(int(t) + inset, 0)
             r, b = min(int(r) - inset, img.width), min(int(b) - inset, img.height)
             if r > l and b > t:
-                lo, hi = img.crop((l, t, r, b)).getextrema()
-                covered += hi - lo > 10  # vector renders are flat; any visible mark under the box counts
+                spread = max(hi - lo for lo, hi in img.crop((l, t, r, b)).getextrema())
+                covered += spread > 6  # vector renders are flat; any visible mark under the box counts
     return covered
 
 

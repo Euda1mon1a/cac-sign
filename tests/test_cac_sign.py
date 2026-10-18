@@ -775,6 +775,26 @@ def test_faint_printed_text_under_a_screen_only_box_is_found(tmp_path):
     assert any("shown on screen but not printed" in p for p in pdf_readers.reader_problems(str(tmp_path / "faint.pdf")))
 
 
+@pytest.mark.skipif(sys.platform != "darwin", reason="Quartz")
+def test_text_as_bright_as_its_background_under_a_cover_is_found(tmp_path):
+    """Orange text on a grey of the same brightness: flat in luminance, plain in colour."""
+    raw = str(tmp_path / "iso.raw.pdf")
+    c = canvas.Canvas(raw, pagesize=(612, 792))
+    c.setFillColorRGB(0.5, 0.5, 0.5)
+    c.rect(60, 580, 380, 50, stroke=0, fill=1)
+    c.setFillColorRGB(0.78, 0.39, 0.235)  # luminance ~0.49, close to the grey's 0.5
+    c.setFont("Helvetica-Bold", 14)
+    c.drawString(80, 600, "APPROVED: 90 DAYS EXCESS LEAVE")
+    c.showPage(); c.save()
+    pdf = pikepdf.open(raw)
+    ap = pdf.make_stream(b"1 g 0 0 340 26 re f")
+    ap.Type, ap.Subtype, ap.BBox = pikepdf.Name.XObject, pikepdf.Name.Form, [0, 0, 340, 26]
+    pdf.pages[0].obj.Annots = pdf.make_indirect(pikepdf.Array([pdf.make_indirect(pikepdf.Dictionary(
+        Type=pikepdf.Name.Annot, Subtype=pikepdf.Name.Square, Rect=[70, 593, 410, 619], AP=pikepdf.Dictionary(N=ap)))]))
+    pdf.save(tmp_path / "iso.pdf")
+    assert any("shown on screen but not printed" in p for p in pdf_readers.reader_problems(str(tmp_path / "iso.pdf")))
+
+
 def _with_annotation(src, dst, **entries):
     pdf = pikepdf.open(src)
     annot = pdf.make_indirect(pikepdf.Dictionary(Type=pikepdf.Name.Annot, Rect=[100, 100, 300, 130], F=4, **entries))
