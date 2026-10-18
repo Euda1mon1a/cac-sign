@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Forms you test with may hold other people's names -- never commit
+*.pdf
+
+# Personal values (name, phone) live in ~/Library/Application Support/cac-sign/identity.json;
+# older versions kept identity.local.json here
+*.local.json
+identity.json
+
+# Signing material -- never commit certificates or keys
+*.p12
+*.pfx
+*.key
+*.pem
+
+# macOS / LibreOffice / temp
+.DS_Store
+.~lock.*#
+*.tmp

@@ -1,0 +1,567 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sign with CAC</title>
+<style nonce="{{NONCE}}">
+:root {
+  --bg: #f4f5f7; --panel: #ffffff; --ink: #1d2330; --muted: #5d6677; --line: #dfe3ea;
+  --accent: #1f5fbf; --accent-ink: #ffffff; --accent-soft: #e6eefb;
+  --ok: #1b7f4b; --ok-soft: #e3f4ea; --warn: #9a5b00; --warn-soft: #fdf1dc;
+  --bad: #b3261e; --bad-soft: #fbe6e4; --edit: #6b3fb5; --edit-soft: #efe7fb;
+  --lock: #6d7380; --lock-soft: #eceef1; --page-shadow: 0 1px 3px rgba(20,30,50,.18);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #15181e; --panel: #1e222a; --ink: #e7eaf0; --muted: #9aa3b2; --line: #313744;
+    --accent: #6ea2ff; --accent-ink: #0d1424; --accent-soft: #1e2b45;
+    --ok: #5ccf8e; --ok-soft: #173326; --warn: #f0b25a; --warn-soft: #3a2c14;
+    --bad: #ff8a80; --bad-soft: #3d1c1a; --edit: #b99bff; --edit-soft: #2c2342;
+    --lock: #9aa0ab; --lock-soft: #2a2e36; --page-shadow: 0 1px 4px rgba(0,0,0,.6);
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #15181e; --panel: #1e222a; --ink: #e7eaf0; --muted: #9aa3b2; --line: #313744;
+  --accent: #6ea2ff; --accent-ink: #0d1424; --accent-soft: #1e2b45;
+  --ok: #5ccf8e; --ok-soft: #173326; --warn: #f0b25a; --warn-soft: #3a2c14;
+  --bad: #ff8a80; --bad-soft: #3d1c1a; --edit: #b99bff; --edit-soft: #2c2342;
+  --lock: #9aa0ab; --lock-soft: #2a2e36; --page-shadow: 0 1px 4px rgba(0,0,0,.6);
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { height: 100%; margin: 0; }
+body { background: var(--bg); color: var(--ink); font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+       display: flex; flex-direction: column; }
+button, input, select, textarea { font: inherit; color: inherit; }
+.bar { display: flex; align-items: center; gap: 12px; padding: 10px 16px; background: var(--panel);
+       border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+.foot { border-top: 1px solid var(--line); border-bottom: 0; }
+.brand { font-weight: 650; }
+.spacer { flex: 1; }
+.muted { color: var(--muted); }
+.chip { font-size: 12px; padding: 2px 8px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); }
+.banner { padding: 10px 16px; background: var(--bad-soft); color: var(--bad); border-bottom: 1px solid var(--line); }
+.banner.info { background: var(--warn-soft); color: var(--warn); }
+.split { flex: 1; display: grid; grid-template-columns: minmax(0, 1fr) 400px; min-height: 0; }
+@media (max-width: 900px) { .split { grid-template-columns: 1fr; } #side { border-left: 0; border-top: 1px solid var(--line); } }
+#pages { overflow: auto; padding: 20px; display: flex; flex-direction: column; align-items: center; gap: 20px; }
+#side { overflow: auto; background: var(--panel); border-left: 1px solid var(--line); padding: 12px 14px 24px; }
+.page { position: relative; width: min(100%, 900px); background: #fff; box-shadow: var(--page-shadow); user-select: none; }
+.page img { display: block; width: 100%; height: auto; }
+.page.drawing { cursor: crosshair; }
+.ov { position: absolute; border: 1.5px solid transparent; border-radius: 2px; cursor: pointer; overflow: hidden;
+      display: flex; align-items: center; color: #0b1a3a; }
+.ov .t { white-space: pre; padding: 0 2px; line-height: 1.05; font-family: Helvetica, Arial, sans-serif; }
+.ov.multi { align-items: flex-start; }
+.ov.multi .t { white-space: pre-wrap; }
+.ov.cb { justify-content: center; font-weight: 700; }
+.ov.st-blank { background: rgba(110, 115, 128, .07); border: 1.5px dashed rgba(110, 115, 128, .55); }
+.ov.st-required { background: rgba(245, 166, 35, .14); border-color: rgba(214, 137, 16, .8); }
+.ov.st-filled { border-color: rgba(46, 160, 67, .45); }
+.ov.dirty { background: #fff; }  /* an edit: paint the new value over the old appearance */
+.ov.st-profile { background: rgba(31, 95, 191, .12); border-color: rgba(31, 95, 191, .75); }
+.ov.st-edited { background: rgba(107, 63, 181, .12); border-color: rgba(107, 63, 181, .8); }
+.ov.st-locked { background: rgba(110, 115, 128, .08); border-color: rgba(110, 115, 128, .35); cursor: default; }
+.ov.sig-signed { background: rgba(46, 160, 67, .12); border: 1.5px solid rgba(46, 160, 67, .8); }
+.ov.sig-problem { background: rgba(211, 47, 47, .14); border: 1.5px solid rgba(211, 47, 47, .85); }
+.ov.sig-empty { background: rgba(110, 115, 128, .06); border: 1.5px dashed rgba(110, 115, 128, .6); }
+.ov.sig-target { background: rgba(31, 95, 191, .14); border: 2px solid rgba(31, 95, 191, .95); }
+.ov .sigt { font: 600 11px -apple-system, sans-serif; padding: 2px 4px; color: #123; }
+.ov.hl { outline: 3px solid var(--accent); outline-offset: 1px; z-index: 2; }
+.newbox { position: absolute; border: 2px solid rgba(31, 95, 191, .95); background: rgba(31, 95, 191, .14); }
+h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 14px 2px 8px; }
+.field { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; margin-bottom: 8px; background: var(--panel); }
+.field.hl { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+.frow { display: flex; align-items: baseline; gap: 8px; margin-bottom: 6px; }
+.fname { font-weight: 600; overflow-wrap: anywhere; flex: 1; }
+.pg { font-size: 11px; color: var(--muted); }
+.badge { font-size: 11px; padding: 1px 7px; border-radius: 999px; white-space: nowrap; }
+.b-filled { background: var(--ok-soft); color: var(--ok); }
+.b-profile { background: var(--accent-soft); color: var(--accent); }
+.b-edited { background: var(--edit-soft); color: var(--edit); }
+.b-blank { background: var(--lock-soft); color: var(--muted); }
+.b-required { background: var(--warn-soft); color: var(--warn); }
+.b-locked { background: var(--lock-soft); color: var(--lock); }
+.fctl { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.fctl input[type=text], .fctl textarea, .fctl select { flex: 1; min-width: 0; padding: 6px 8px; border: 1px solid var(--line);
+      border-radius: 6px; background: var(--bg); }
+.fctl textarea { min-height: 54px; resize: vertical; }
+.fctl input:focus, .fctl textarea:focus, .fctl select:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+.fctl input:disabled, .fctl textarea:disabled, .fctl select:disabled { opacity: .7; }
+.seg { display: flex; flex-wrap: wrap; gap: 4px; }
+.seg button { padding: 4px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); cursor: pointer; }
+.seg button.on { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.mini { padding: 4px 8px; border: 1px solid var(--line); border-radius: 6px; background: transparent; cursor: pointer; font-size: 12px; }
+.mini:hover { border-color: var(--accent); }
+.sigrow { display: flex; gap: 8px; align-items: flex-start; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; margin-bottom: 8px; }
+.sigrow.signed { background: var(--ok-soft); border-color: transparent; }
+.sigrow.problem { background: var(--bad-soft); border-color: transparent; }
+.sigrow input { margin-top: 3px; }
+.sigrow .who { font-weight: 600; }
+.sigrow .detail { font-size: 12px; color: var(--muted); }
+button.primary, button.secondary, button.ghost { padding: 8px 16px; border-radius: 8px; cursor: pointer; border: 1px solid transparent; font-weight: 600; }
+button.primary { background: var(--accent); color: var(--accent-ink); }
+button.secondary { background: var(--accent-soft); color: var(--accent); }
+button.ghost { background: transparent; border-color: var(--line); }
+button:disabled { opacity: .45; cursor: not-allowed; }
+.modal { position: fixed; inset: 0; background: rgba(10, 14, 22, .45); display: grid; place-items: center; z-index: 10; padding: 16px; }
+.card { background: var(--panel); border-radius: 14px; padding: 22px 24px; width: min(560px, 100%); box-shadow: 0 10px 40px rgba(0,0,0,.3); }
+.card h3 { margin: 0 0 8px; font-size: 18px; }
+.card .big { font-size: 34px; line-height: 1; margin-bottom: 10px; }
+.card pre { white-space: pre-wrap; overflow-wrap: anywhere; background: var(--bg); padding: 10px; border-radius: 8px; font-size: 12px; max-height: 240px; overflow: auto; }
+.card.wide { width: min(980px, 100%); max-height: 92vh; display: flex; flex-direction: column; }
+.review { flex: 1; overflow: auto; background: var(--bg); border-radius: 10px; padding: 14px; display: flex;
+          flex-direction: column; align-items: center; gap: 14px; min-height: 200px; }
+.review .page { width: min(100%, 820px); }
+.changes { border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px; margin: 0 0 10px; max-height: 32vh; overflow: auto; }
+.changes h4 { margin: 2px 0 6px; font-size: 13px; }
+.chg { display: flex; flex-wrap: wrap; gap: 4px 10px; padding: 5px 0; border-top: 1px solid var(--line); }
+.chg .cn { font-weight: 600; }
+.chg .cv { color: var(--muted); overflow-wrap: anywhere; }
+.chg.flagged .cn { color: var(--warn); }
+.cf { flex-basis: 100%; font-size: 12px; color: var(--warn); }
+.ack { display: flex; gap: 8px; align-items: center; margin: 8px 0 0; font-weight: 600; color: var(--warn); }
+.prior { font-size: 12px; color: var(--warn); margin: 6px 0 0; }
+.card .actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
+.card ul { padding-left: 18px; margin: 8px 0; }
+.spin { width: 28px; height: 28px; border: 3px solid var(--accent-soft); border-top-color: var(--accent); border-radius: 50%; animation: s 1s linear infinite; margin-bottom: 12px; }
+@keyframes s { to { transform: rotate(360deg); } }
+.empty { padding: 30px; color: var(--muted); text-align: center; }
+</style>
+</head>
+<body>
+<header class="bar">
+  <span class="brand">Sign with CAC</span>
+  <select id="fileSel" hidden aria-label="Document"></select>
+  <span id="fileName" class="muted"></span>
+  <span id="profile" class="chip" hidden></span>
+  <span class="spacer"></span>
+  <label><input type="checkbox" id="blankOnly"> Show blank fields only</label>
+</header>
+<div id="banner" class="banner" hidden></div>
+<main class="split">
+  <section id="pages" aria-label="Document pages"><div class="empty">Loading…</div></section>
+  <aside id="side" aria-label="Fields">
+    <h2>Signature</h2>
+    <div id="sigPanel"></div>
+    <h2>Fields</h2>
+    <div id="fieldList"></div>
+  </aside>
+</main>
+<footer class="bar foot">
+  <span id="summary" class="muted"></span>
+  <span class="spacer"></span>
+  <button id="drawBtn" class="ghost" type="button">Draw a signature box</button>
+  <button id="fillBtn" class="secondary" type="button">Save filled copy</button>
+  <button id="signBtn" class="primary" type="button">Sign</button>
+</footer>
+<div id="modal" class="modal" hidden><div id="card" class="card" role="dialog" aria-modal="true"></div></div>
+
+<script nonce="{{NONCE}}">
+"use strict";
+let token = location.hash.slice(1);
+try { if (token) sessionStorage.setItem("cac-token", token); else token = sessionStorage.getItem("cac-token") || ""; } catch (e) {}
+history.replaceState(null, "", "/");
+
+const $ = (id) => document.getElementById(id);
+const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+let files = [], cur = 0, model = null, vals = {}, orig = {}, prop = {}, target = null, place = null, drawing = false;
+const urls = [];
+
+async function api(path, body) {
+  const opts = { headers: { "X-CAC-Token": token } };
+  if (body !== undefined) { opts.method = "POST"; opts.headers["Content-Type"] = "application/json"; opts.body = JSON.stringify(body); }
+  const r = await fetch(path, opts);
+  if (r.status === 403) throw new Error("This page has expired. Run CAC Sign again from Finder.");
+  if (!r.ok) { let m = r.statusText; try { m = (await r.json()).error || m; } catch (e) {} throw new Error(m); }
+  return r;
+}
+
+function blank(f, v) { return f.kind === "checkbox" ? !v : (v == null || String(v).trim() === ""); }
+function same(a, b) { return String(a) === String(b); }
+function status(f) {
+  if (f.readonly || f.locked) return "locked";
+  const v = vals[f.name];
+  if (!same(v, orig[f.name])) return (f.name in prop && same(v, prop[f.name])) ? "profile" : "edited";
+  if (blank(f, v)) return f.required ? "required" : "blank";
+  return "filled";
+}
+const LABEL = { filled: "Filled", profile: "From your profile", edited: "Edited", blank: "Blank", required: "Marked required", locked: "Locked" };
+
+async function loadFiles() {
+  files = await (await api("/api/files")).json();
+  const sel = $("fileSel");
+  sel.replaceChildren(...files.map((f) => { const o = el("option", null, f.name); o.value = f.index; return o; }));
+  sel.hidden = files.length < 2;
+  sel.onchange = () => load(Number(sel.value));
+  await load(0);
+}
+
+async function load(i) {
+  cur = i; $("fileSel").value = i; place = null; drawing = false;
+  urls.splice(0).forEach((u) => URL.revokeObjectURL(u));
+  $("pages").replaceChildren(el("div", "empty", "Loading…"));
+  try { model = await (await api(`/api/form?f=${i}`)).json(); }
+  catch (e) { $("pages").replaceChildren(el("div", "empty", e.message)); return; }
+  $("fileName").textContent = model.file;
+  const p = $("profile"); p.hidden = !model.profile; p.textContent = model.profile ? model.profile.description : "";
+  vals = {}; orig = {}; prop = {};
+  for (const f of model.fields) {
+    if (f.kind === "signature") continue;
+    orig[f.name] = f.value;
+    if ("proposed" in f) prop[f.name] = f.proposed;
+    vals[f.name] = ("proposed" in f && !f.readonly && !f.locked) ? f.proposed : f.value;
+  }
+  target = model.sign_target;
+  const b = $("banner");
+  const prior = (model.signed_before || []).map((p) => `You already signed this exact file on ${p.when} → ${p.name}.`);
+  const msgs = [model.blocked, ...prior, ...(model.notes || [])].filter(Boolean);
+  b.hidden = !msgs.length; b.className = model.blocked ? "banner" : "banner info"; b.textContent = msgs.join("  ");
+  renderPages(); renderSide(); summary();
+}
+
+function renderPages() {
+  const wrap = $("pages"); wrap.replaceChildren();
+  model.pages.forEach((pg, pi) => {
+    const box = el("div", "page"); box.dataset.page = pi;
+    box.style.aspectRatio = `${pg.w} / ${pg.h}`;
+    const img = el("img"); img.alt = `Page ${pi + 1}`; box.appendChild(img);
+    api(`/api/page?f=${cur}&p=${pi}`).then((r) => r.blob()).then((bl) => { const u = URL.createObjectURL(bl); urls.push(u); img.src = u; }).catch(() => {});
+    for (const f of model.fields) f.widgets.forEach((w, wi) => { if (w.page === pi) box.appendChild(overlay(f, w, wi)); });
+    if (place && place.page === pi) box.appendChild(newBox(place.box));
+    box.addEventListener("pointerdown", (e) => startDraw(e, box, pi));
+    wrap.appendChild(box);
+  });
+  fitText();
+}
+
+function pos(node, b) {
+  node.style.left = `${b[0] * 100}%`; node.style.top = `${b[1] * 100}%`;
+  node.style.width = `${(b[2] - b[0]) * 100}%`; node.style.height = `${(b[3] - b[1]) * 100}%`;
+}
+
+function overlay(f, w, wi) {
+  const o = el("div", "ov"); o.dataset.name = f.name; o.dataset.wi = wi; pos(o, w.box);
+  if (f.kind === "signature") {
+    const s = f.signature;
+    if (s) { o.classList.add(s.ok ? "sig-signed" : "sig-problem"); o.title = `${f.name}: ${s.signer}`; }
+    else if (!place && f.name === target) { o.classList.add("sig-target"); o.appendChild(el("span", "sigt", "Your signature goes here")); }
+    else o.classList.add("sig-empty");
+    o.title = f.name;
+    o.addEventListener("click", () => { if (!s && !f.locked && !drawing) { target = f.name; place = null; refresh(); } });
+    return o;
+  }
+  o.classList.add(`st-${status(f)}`);
+  const v = vals[f.name], dirty = !same(v, orig[f.name]);
+  if (dirty) o.classList.add("dirty");
+  if (f.kind === "checkbox") { o.classList.add("cb"); if (dirty) o.textContent = v ? "✓" : ""; }
+  else if (f.kind === "radio") { o.classList.add("cb"); if (dirty) o.textContent = v && v === w.option ? "●" : ""; }
+  else { if (f.multiline) o.classList.add("multi"); if (dirty) o.appendChild(el("span", "t", v || "")); }
+  o.title = f.name;
+  o.addEventListener("click", () => { if (!drawing) focusField(f.name); });
+  o.addEventListener("mouseenter", () => mark(f.name, true));
+  o.addEventListener("mouseleave", () => mark(f.name, false));
+  return o;
+}
+
+function newBox(b) { const n = el("div", "newbox"); pos(n, b); n.appendChild(el("span", "sigt", "New signature box")); return n; }
+
+function fitText() {
+  requestAnimationFrame(() => document.querySelectorAll(".ov").forEach((o) => {
+    const h = o.getBoundingClientRect().height;
+    const t = o.querySelector(".t");
+    if (t) t.style.fontSize = `${Math.max(6, Math.min(o.classList.contains("multi") ? h * 0.22 : h * 0.68, 20))}px`;
+    else if (o.classList.contains("cb")) o.style.fontSize = `${Math.max(7, h * 0.8)}px`;
+  }));
+}
+new ResizeObserver(() => fitText()).observe($("pages"));
+
+function mark(name, on) {
+  document.querySelectorAll(`.ov, .field`).forEach((n) => { if (n.dataset.name === name) n.classList.toggle("hl", on); });
+}
+
+function focusField(name) {
+  const row = [...document.querySelectorAll(".field")].find((n) => n.dataset.name === name);
+  if (!row) { $("blankOnly").checked = false; renderSide(); return focusField(name); }
+  row.scrollIntoView({ block: "center", behavior: "smooth" });
+  const inp = row.querySelector("input, textarea, select, button"); if (inp && !inp.disabled) inp.focus();
+  mark(name, true); setTimeout(() => mark(name, false), 1200);
+}
+
+function renderSide() {
+  // signature choices
+  const sp = $("sigPanel"); sp.replaceChildren();
+  const sigs = model.fields.filter((f) => f.kind === "signature");
+  for (const f of sigs) {
+    const r = el("div", "sigrow");
+    const body = el("div");
+    if (f.signature) {
+      r.classList.add(f.signature.ok ? "signed" : "problem");
+      body.append(el("div", "who", `${f.signature.ok ? "✓" : "⚠"} ${f.name}: ${f.signature.signer}`),
+                  el("div", "detail", f.signature.ok ? `Signed ${f.signature.when} · valid` : f.signature.detail));
+    } else {
+      const rb = el("input"); rb.type = "radio"; rb.name = "sigTarget"; rb.checked = !place && f.name === target;
+      rb.disabled = f.locked; rb.setAttribute("aria-label", `Sign ${f.name}`);
+      rb.addEventListener("change", () => { target = f.name; place = null; refresh(); });
+      r.appendChild(rb);
+      body.append(el("div", "who", f.name), el("div", "detail", f.locked ? "Locked by an existing signature" : "Empty — sign here"));
+    }
+    r.appendChild(body); sp.appendChild(r);
+  }
+  if (place) {
+    const r = el("div", "sigrow"); const rb = el("input"); rb.type = "radio"; rb.checked = true; rb.disabled = true;
+    const body = el("div"); body.append(el("div", "who", "New signature box"), el("div", "detail", `Drawn on page ${place.page + 1}`));
+    const clr = el("button", "mini", "Remove"); clr.type = "button"; clr.addEventListener("click", () => { place = null; refresh(); });
+    r.append(rb, body, clr); sp.appendChild(r);
+  }
+  if (!sigs.length && !place) sp.appendChild(el("div", "detail muted", "No signature box on this form. Use “Draw a signature box”."));
+
+  // fields, in page then top-to-bottom order
+  const list = $("fieldList"); list.replaceChildren();
+  const only = $("blankOnly").checked;
+  const fs = model.fields.filter((f) => f.kind !== "signature").map((f) => ({ f, w: f.widgets[0] }))
+    .sort((a, b) => (a.w ? a.w.page : 1e9) - (b.w ? b.w.page : 1e9) || (a.w ? a.w.box[1] : 0) - (b.w ? b.w.box[1] : 0) || (a.w ? a.w.box[0] : 0) - (b.w ? b.w.box[0] : 0));
+  let shown = 0;
+  for (const { f, w } of fs) {
+    const st = status(f);
+    if (only && !["blank", "required"].includes(st)) continue;
+    list.appendChild(fieldRow(f, w, st)); shown++;
+  }
+  if (!shown) list.appendChild(el("div", "empty", only ? "No blank fields left." : "This PDF has no fillable fields."));
+}
+
+function fieldRow(f, w, st) {
+  const row = el("div", "field"); row.dataset.name = f.name;
+  const top = el("div", "frow");
+  top.append(el("span", "fname", f.name), el("span", `badge b-${st}`, f.readonly && !f.locked ? "Read-only" : LABEL[st]));
+  if (w) top.appendChild(el("span", "pg", `p${w.page + 1}`));
+  row.appendChild(top);
+  const ctl = el("div", "fctl");
+  const off = f.readonly || f.locked || !f.editable;
+  const set = (v) => { vals[f.name] = v; refreshField(f); };
+  if (f.kind === "checkbox") {
+    const lab = el("label"); const cb = el("input"); cb.type = "checkbox"; cb.checked = !!vals[f.name]; cb.disabled = off;
+    cb.addEventListener("change", () => set(cb.checked)); lab.append(cb, document.createTextNode(" Checked")); ctl.appendChild(lab);
+  } else if (f.kind === "radio") {
+    const seg = el("div", "seg");
+    for (const opt of [...(f.options || []), ""]) {
+      const b = el("button", vals[f.name] === opt ? "on" : "", opt || "None"); b.type = "button"; b.disabled = off;
+      b.addEventListener("click", () => { set(opt); seg.querySelectorAll("button").forEach((x) => x.classList.toggle("on", x === b)); });
+      seg.appendChild(b);
+    }
+    ctl.appendChild(seg);
+  } else if (f.kind === "choice" && !f.custom) {
+    const s = el("select"); s.disabled = off;
+    for (const o of [{ value: "", label: "" }, ...(f.options || [])]) { const op = el("option", null, o.label); op.value = o.value; s.appendChild(op); }
+    s.value = vals[f.name]; s.addEventListener("change", () => set(s.value)); ctl.appendChild(s);
+  } else {
+    const inp = f.multiline ? el("textarea") : el("input");
+    if (!f.multiline) inp.type = "text";
+    inp.value = vals[f.name] || ""; inp.disabled = off; inp.setAttribute("aria-label", f.name);
+    if (f.maxlen) inp.maxLength = f.maxlen;
+    inp.addEventListener("input", () => set(inp.value));
+    inp.addEventListener("focus", () => mark(f.name, true));
+    inp.addEventListener("blur", () => mark(f.name, false));
+    if (!f.multiline) inp.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); nextInput(inp); } });
+    ctl.appendChild(inp);
+    if (!off) {
+      const na = el("button", "mini", "N/A"); na.type = "button"; na.title = "Fill with N/A";
+      na.addEventListener("click", () => { inp.value = "N/A"; set("N/A"); }); ctl.appendChild(na);
+    }
+  }
+  if (!off && !same(vals[f.name], orig[f.name])) {
+    const u = el("button", "mini", "Undo"); u.type = "button"; u.title = "Back to what the PDF had";
+    u.addEventListener("click", () => { vals[f.name] = orig[f.name]; refresh(); }); ctl.appendChild(u);
+  }
+  row.appendChild(ctl);
+  row.addEventListener("mouseenter", () => mark(f.name, true));
+  row.addEventListener("mouseleave", () => mark(f.name, false));
+  return row;
+}
+
+function nextInput(cur) {
+  const all = [...document.querySelectorAll("#fieldList input[type=text]:not(:disabled), #fieldList textarea:not(:disabled)")];
+  const n = all[all.indexOf(cur) + 1]; if (n) n.focus();
+}
+
+function refreshField(f) {
+  // redraw this field's boxes and its badge, without rebuilding the input being typed in
+  const st = status(f);
+  document.querySelectorAll(".ov").forEach((o) => {
+    if (o.dataset.name === f.name) { const wi = Number(o.dataset.wi); o.replaceWith(overlay(f, f.widgets[wi], wi)); }
+  });
+  const row = [...document.querySelectorAll(".field")].find((n) => n.dataset.name === f.name);
+  if (row) {
+    const b = row.querySelector(".badge"); b.className = `badge b-${st}`; b.textContent = f.readonly && !f.locked ? "Read-only" : LABEL[st];
+    const ctl = row.querySelector(".fctl"); const undo = [...ctl.querySelectorAll(".mini")].find((x) => x.textContent === "Undo");
+    const changed = !same(vals[f.name], orig[f.name]);
+    if (changed && !undo) { const u = el("button", "mini", "Undo"); u.type = "button"; u.addEventListener("click", () => { vals[f.name] = orig[f.name]; refresh(); }); ctl.appendChild(u); }
+    if (!changed && undo) undo.remove();
+  }
+  fitText(); summary();
+}
+
+function refresh() { renderPages(); renderSide(); summary(); }
+
+function changes() {
+  const c = {};
+  for (const f of model.fields) if (f.kind !== "signature" && !f.readonly && !f.locked && !same(vals[f.name], orig[f.name])) c[f.name] = vals[f.name];
+  return c;
+}
+
+function summary() {
+  const fs = model.fields.filter((f) => f.kind !== "signature" && !f.readonly && !f.locked);
+  const blanks = fs.filter((f) => blank(f, vals[f.name])), req = blanks.filter((f) => f.required);
+  const n = Object.keys(changes()).length;
+  const where = place ? "a new box" : (target ? `“${target}”` : null);
+  const parts = [`${n} change${n === 1 ? "" : "s"}`, `${blanks.length} blank${req.length ? ` (${req.length} marked required)` : ""}`];
+  parts.push(where ? `signs ${where}` : "no signature box chosen");
+  $("summary").textContent = parts.join(" · ");
+  $("signBtn").disabled = !!model.blocked || !where;
+  $("fillBtn").disabled = !n;
+  $("drawBtn").textContent = drawing ? "Drag on the page…" : "Draw a signature box";
+}
+
+function startDraw(e, box, pi) {
+  if (!drawing) return;
+  e.preventDefault();
+  const r = box.getBoundingClientRect();
+  const x0 = (e.clientX - r.left) / r.width, y0 = (e.clientY - r.top) / r.height;
+  const nb = newBox([x0, y0, x0, y0]); box.appendChild(nb);
+  const move = (ev) => {
+    const x = Math.min(1, Math.max(0, (ev.clientX - r.left) / r.width)), y = Math.min(1, Math.max(0, (ev.clientY - r.top) / r.height));
+    pos(nb, [Math.min(x0, x), Math.min(y0, y), Math.max(x0, x), Math.max(y0, y)]);
+    nb.dataset.box = JSON.stringify([Math.min(x0, x), Math.min(y0, y), Math.max(x0, x), Math.max(y0, y)]);
+  };
+  const up = () => {
+    window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", up);
+    const b = nb.dataset.box ? JSON.parse(nb.dataset.box) : null;
+    drawing = false; document.querySelectorAll(".page").forEach((p) => p.classList.remove("drawing"));
+    if (b && (b[2] - b[0]) * r.width > 40 && (b[3] - b[1]) * r.height > 14) { place = { page: pi, box: b }; target = null; }
+    refresh();
+  };
+  window.addEventListener("pointermove", move); window.addEventListener("pointerup", up);
+}
+
+$("drawBtn").addEventListener("click", () => {
+  drawing = !drawing;
+  document.querySelectorAll(".page").forEach((p) => p.classList.toggle("drawing", drawing));
+  summary();
+});
+$("blankOnly").addEventListener("change", renderSide);
+
+function modal(build) { const c = $("card"); c.className = "card"; c.replaceChildren(); build(c); $("modal").hidden = false; }
+function closeModal() { $("modal").hidden = true; }
+function actions(c, ...btns) { const a = el("div", "actions"); a.append(...btns); c.appendChild(a); }
+function btn(text, cls, fn) { const b = el("button", cls, text); b.type = "button"; b.addEventListener("click", fn); return b; }
+
+async function run(mode) {
+  if (mode === "fill") {
+    modal((c) => { c.append(el("div", "spin"), el("h3", null, "Saving…")); });
+    let res;
+    try { res = await (await api("/api/fill", { f: cur, values: changes() })).json(); } catch (e) { res = { ok: false, text: e.message }; }
+    return showResult(res, "fill");
+  }
+  const body = { f: cur, mode: place ? "place" : "sign", values: changes() };
+  if (place) { body.page = place.page; body.box = place.box; } else body.field = target;
+  modal((c) => { c.append(el("div", "spin"), el("h3", null, "Preparing the exact copy to sign…")); });
+  let prep;
+  try { prep = await (await api("/api/prepare", body)).json(); } catch (e) { prep = { ok: false, text: e.message }; }
+  if (!prep.ok) return showResult(prep, "sign");
+  modal((c) => {
+    c.classList.add("wide");
+    c.append(el("h3", null, "Review exactly what you'll sign"),
+             el("p", "muted", "This is how the signed file will look in any PDF viewer, with your edits written in. Your signature goes in the outlined box. After signing, the result is checked against this view."));
+    const ch = [...(prep.changes || [])].sort((a, b) => (b.flags.length > 0) - (a.flags.length > 0));
+    const warns = prep.warnings || [];
+    if (warns.length) {
+      const wb = el("div", "changes");
+      wb.appendChild(el("h4", null, "Other viewers may show this file differently"));
+      for (const w of warns) { const row = el("div", "chg flagged"); row.appendChild(el("div", "cf", `⚠ ${w}`)); wb.appendChild(row); }
+      c.appendChild(wb);
+    }
+    const box = el("div", "changes");
+    box.appendChild(el("h4", null, ch.length ? `What you're changing (${ch.length})` : "No changes: you're signing the form as it is"));
+    for (const x of ch) {
+      const row = el("div", x.flags.length ? "chg flagged" : "chg");
+      row.append(el("span", "cn", x.name), el("span", "cv", `${x.from} → ${x.to}`));
+      if (x.flags.length) row.appendChild(el("div", "cf", `⚠ ${x.flags.join("; ")}`));
+      box.appendChild(row);
+    }
+    c.appendChild(box);
+    // the already-signed notice and the acknowledgement go below the pages, right above the button they gate
+    const footer = el("div");
+    for (const p of prep.signed_before || []) footer.appendChild(el("div", "prior", `⚠ You already signed this exact file on ${p.when} → ${p.name}. This makes another, separate copy.`));
+    let ack = null;
+    const flagged = ch.some((x) => x.flags.length);
+    if (flagged || warns.length) {  // the server refuses to sign without this too
+      const lab = el("label", "ack"); ack = el("input"); ack.type = "checkbox";
+      const say = flagged && warns.length ? "I meant to make the flagged changes, and I've read the warnings"
+                : flagged ? "I meant to make the flagged changes" : "I've read the warnings above";
+      lab.append(ack, document.createTextNode(say));
+      footer.appendChild(lab);
+    }
+    const rv = el("div", "review");
+    for (let i = 0; i < prep.pages; i++) {
+      const pg = el("div", "page"); const g = model.pages[i] || model.pages[0];
+      pg.style.aspectRatio = `${g.w} / ${g.h}`;
+      const img = el("img"); img.alt = `Page ${i + 1} as it will be signed`; pg.appendChild(img);
+      api(`/api/preview?p=${i}`).then((r) => r.blob()).then((b) => { const u = URL.createObjectURL(b); urls.push(u); img.src = u; }).catch(() => {});
+      if (prep.where && prep.where.page === i) { const nb = newBox(prep.where.box); nb.firstChild.textContent = "Your signature goes here"; pg.appendChild(nb); }
+      rv.appendChild(pg);
+    }
+    c.append(rv, footer);
+    const go = btn("Sign this", "primary", () => commitSign(ack ? ack.checked : false));
+    if (ack) { go.disabled = true; ack.addEventListener("change", () => { go.disabled = !ack.checked; }); }
+    actions(c, btn("Back", "ghost", async () => { try { await api("/api/discard", {}); } catch (e) {} closeModal(); }), go);
+    if (prep.where && rv.children[prep.where.page]) setTimeout(() => rv.children[prep.where.page].scrollIntoView({ block: "center" }), 50);
+  });
+}
+
+async function commitSign(ack) {
+  modal((c) => {
+    c.append(el("div", "spin"), el("h3", null, "Enter your PIN in the macOS window"),
+             el("p", "muted", "macOS asks for your CAC PIN in its own smart-card window. This page never sees it. If you don't see the window, it may be behind this one."));
+  });
+  let res;
+  try { res = await (await api("/api/commit", { ack: ack === true })).json(); } catch (e) { res = { ok: false, text: e.message }; }
+  showResult(res, "sign");
+}
+
+function showResult(res, mode) {
+  modal((c) => {
+    if (res.ok) {
+      c.append(el("div", "big", "✓"), el("h3", null, mode === "fill" ? "Saved" : "Signed and verified"), el("p", null, res.name || ""));
+      if (res.signatures && res.signatures.length) {
+        const ul = el("ul");
+        for (const s of res.signatures) ul.appendChild(el("li", null, `${s.field}: ${s.signer}, ${s.when}${s.ok ? " · valid" : ` · ${s.detail}`}`));
+        c.append(ul);
+      }
+      if (res.next_step && mode !== "fill") c.append(el("p", "muted", `Next: ${res.next_step}`));
+      actions(c, btn("Show in Finder", "secondary", () => api("/api/reveal", { f: cur })), btn(files.length > 1 && cur < files.length - 1 ? "Next document" : "Done", "primary", done));
+    } else if (res.cancelled) {
+      c.append(el("h3", null, "Cancelled"), el("p", null, "Nothing was signed."));
+      actions(c, btn("Back", "primary", closeModal));
+    } else {
+      c.append(el("div", "big", "⚠"), el("h3", null, mode === "fill" ? "Not saved" : "Not signed"), el("pre", null, res.text || "Unknown error"));
+      const b = [btn("Back", "primary", closeModal)];
+      if (res.name) b.unshift(btn("Show the failed copy", "secondary", () => api("/api/reveal", { f: cur })));
+      actions(c, ...b);
+    }
+  });
+}
+
+async function done() {
+  if (cur < files.length - 1) { closeModal(); return load(cur + 1); }
+  try { await api("/api/close", {}); } catch (e) {}
+  modal((c) => { c.append(el("h3", null, "All done"), el("p", "muted", "You can close this tab.")); });
+}
+
+$("signBtn").addEventListener("click", () => run("sign"));
+$("fillBtn").addEventListener("click", () => run("fill"));
+setInterval(() => { if (!document.hidden) api("/api/ping").catch(() => {}); }, 60000);
+loadFiles().catch((e) => { $("pages").replaceChildren(el("div", "empty", e.message)); });
+</script>
+</body>
+</html>

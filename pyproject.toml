@@ -1,0 +1,21 @@
+[project]
+name = "cac-sign"
+version = "0.1.0"
+description = "Fill, CAC-sign and verify PDFs on a Mac, with Finder Quick Actions and a review page."
+readme = "README.md"
+license = "MIT"
+authors = [{ name = "Aaron Montgomery" }]
+requires-python = ">=3.9"
+dependencies = [
+    "reportlab>=4.0",
+    "pikepdf>=8.0",
+    "pyhanko[pkcs11]>=0.21",
+    # cac_sign.py: sign through macOS's built-in smart-card support (system PIN window)
+    "pyobjc-framework-Security>=10; sys_platform == 'darwin'",
+    # cac_sign_editor.py: render PDF pages for the review page
+    "pyobjc-framework-Quartz>=10; sys_platform == 'darwin'",
+]
+
+# This is a run-in-place script tool, not an installable package.
+[tool.uv]
+package = false

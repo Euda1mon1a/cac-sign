@@ -1,0 +1,5 @@
+reportlab>=4.0
+pikepdf>=8.0
+pyhanko[pkcs11]>=0.21
+pyobjc-framework-Security>=10; sys_platform == 'darwin'
+pyobjc-framework-Quartz>=10; sys_platform == 'darwin'

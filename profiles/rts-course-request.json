@@ -1,0 +1,18 @@
+{
+  "id": "rts-course-request",
+  "description": "RTS course request (BLS/ALS/PALS), supervisor block",
+  "match_fields": ["Applicant Signature", "Signature", "Supervisor Duty Phone", "Yes_2", "No_2",
+                   "Head Nurse or  OIC Print Full Name"],
+  "require_signed": ["Applicant Signature"],
+  "sign_field": "Signature",
+  "reason": "Supervisor approval",
+  "fill": {
+    "Yes": "x",
+    "Yes_2": "x",
+    "Head Nurse or  OIC Print Full Name": {"value": "${full_name}", "if_empty": true},
+    "Supervisor Title": {"value": "${title}", "if_empty": true},
+    "Supervisor Duty Phone": {"value": "${duty_phone}", "if_empty": true},
+    "Date": "${today}"
+  },
+  "next_step": "email it with the applicant's card copies to the RTS address printed at the bottom of the form."
+}
