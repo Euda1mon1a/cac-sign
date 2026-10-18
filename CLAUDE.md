@@ -130,7 +130,20 @@ digest never matched the bytes Acrobat wrote to the Mac through Citrix drive map
       re-save;
     - something is hidden on screen but prints (`_screen_print_problems`): an
       annotation with Hidden or NoView plus Print, or optional content whose default
-      configuration switches a layer off or auto-switches by usage. The review shows
+      configuration switches a layer off or auto-switches by usage, or a layer whose
+      own /Usage carries Print, View or Zoom behaviour or whose /Intent leaves out
+      /View (a content-stream cover in a "don't print" layer got past the default-
+      configuration check; real layers carry only CreatorInfo or PageElement).
+      `_optional_content` finds groups by walking from the pages (resources,
+      XObjects, annotation /OC, OCMDs) and the layer table, so a group left out of
+      /OCGs, or defined inline with no table at all, is still judged. Being left out
+      of /OCGs is not itself refused: Acrobat's Headers/Footers do that on real forms.
+      CoreGraphics doesn't resolve OCMD /VE, OCMD policies or radio groups per spec,
+      so an OCMD with /VE or a /P other than /AnyOn, an RBGroup with 2+ members,
+      and alternate /Configs are refused (none in 177 real PDFs). Residual, named in
+      the README: an undeclared group's state and the viewer's choice of config are
+      not fixed by the spec, and one renderer can't prove what Acrobat shows; the
+      layer warning makes the signer check layered files in Acrobat. The review shows
       the screen view, and a printout is what gets filed. A security review signed
       a NoView+Print "APPROVED FOR 90 DAYS EXCESS LEAVE" before this. In real
       paperwork it only ever caught a DocuSign envelope-ID stamp. It also refuses a
@@ -142,6 +155,13 @@ digest never matched the bytes Acrobat wrote to the Mac through Citrix drive map
       counts as a placed orphan. `_misplaced_annotations` refuses any annotation,
       direct or indirect, whose /P names another page or that sits on several pages
       (none of 177 real PDFs has one);
+    - a box shown on screen but not printed covers something that prints
+      (`_screen_only_boxes`, `_covered_print`): the print view (pikepdf
+      `flatten_annotations("print")`) is rendered and each screen-only box's area
+      checked for non-uniform pixels. The review's screen render showed a white box
+      while the printout showed "APPROVED: 90 DAYS EXCESS LEAVE" under it (fourth
+      review round). Screen-only Print/Reset buttons over empty areas (5 of 55 real
+      forms have them) pass;
     - any of these checks raises: `reader_problems` returns "its structure could not
       be checked (...)" instead of crashing, so the file is refused with a reason;
 
@@ -163,7 +183,8 @@ digest never matched the bytes Acrobat wrote to the Mac through Citrix drive map
     with the signature box masked. A mismatch leaves `.FAILED.pdf`;
   - `viewer_warnings` (in `pdf_readers.py`) flags what is signable but may look
     different elsewhere: NeedAppearances, JavaScript or AA actions, page areas
-    outside the CropBox, and form fields on no page. They are not refusals, because real forms carry them, but the
+    outside the CropBox, form fields on no page, comment text, and layers (readers
+    can switch a layer off and reveal what it covered). They are not refusals, because real forms carry them, but the
     signer must have seen them: `prepare` sets `needs_ack` for them as for flagged
     changes, and `make_plan` adds them to the CLI and quick Quick Action plan as
     `WARNING:` lines;

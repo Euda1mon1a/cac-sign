@@ -127,9 +127,13 @@ are kept when you update.
   form, or qpdf, pyHanko and Apple's PDF reader read or draw it differently. What
   you check might not be what Acrobat shows. Acrobat itself can't be run for this
   check, so a file crafted to fool only Acrobat could still pass; if a form from an
-  unknown sender matters, open your signed copy in Acrobat too.
-- **Something is hidden on screen but prints**: an annotation flagged that way, or
-  layers switched off. You would be signing content you never saw.
+  unknown sender matters, open your signed copy in Acrobat too. That goes double for
+  PDFs with layers: the review draws them with Apple's renderer alone, and some layer
+  settings are left to each viewer, so a layered PDF always asks you to check it in
+  Acrobat first.
+- **Something is hidden on screen but prints**: an annotation flagged that way,
+  layers switched off, or a box shown only on screen that covers printed text. You
+  would be signing content you never saw.
 - **The applicant has not signed yet**, when the profile requires it.
 - **The document is certified "no changes allowed"**, or the field is locked by a
   signature.

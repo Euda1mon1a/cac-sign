@@ -725,6 +725,231 @@ def test_a_form_tree_that_cannot_be_walked_is_refused_not_crashed(tmp_path, blan
     assert problems and all(isinstance(p, str) for p in problems)
 
 
+def _covered_pdf(path, fill, over_text=True, rotate=0):
+    """Page text, and a screen-only (no Print flag) box drawn over it, or over an empty area."""
+    raw = str(path) + ".raw.pdf"
+    c = canvas.Canvas(raw, pagesize=(612, 792))
+    c.setFont("Helvetica-Bold", 14)
+    c.drawString(80, 600, "APPROVED: 90 DAYS EXCESS LEAVE")
+    c.showPage(); c.save()
+    pdf = pikepdf.open(raw)
+    ap = pdf.make_stream(f"{fill} 0 0 340 26 re f".encode())
+    ap.Type, ap.Subtype, ap.BBox = pikepdf.Name.XObject, pikepdf.Name.Form, [0, 0, 340, 26]
+    y = 593 if over_text else 300
+    box = pdf.make_indirect(pikepdf.Dictionary(Type=pikepdf.Name.Annot, Subtype=pikepdf.Name.Square,
+                                               Rect=[70, y, 410, y + 26], AP=pikepdf.Dictionary(N=ap)))
+    pdf.pages[0].obj.Annots = pdf.make_indirect(pikepdf.Array([box]))
+    if rotate:
+        pdf.pages[0].obj.Rotate = rotate
+    pdf.save(path)
+    return str(path)
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="Quartz")
+@pytest.mark.parametrize("fill,rotate", [("1 g", 0), ("0 g", 0), ("1 g", 90), ("0.5 g", 270)])
+def test_a_screen_only_box_over_printed_text_is_never_signed(tmp_path, fill, rotate):
+    """The review shows the box and hides the text; a printout drops the box and shows the text."""
+    covered = _covered_pdf(tmp_path / "covered.pdf", fill, rotate=rotate)
+    assert any("shown on screen but not printed" in p for p in pdf_readers.reader_problems(covered))
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="Quartz")
+def test_a_screen_only_button_over_an_empty_area_is_fine(tmp_path):
+    assert pdf_readers.reader_problems(_covered_pdf(tmp_path / "button.pdf", "0.8 g", over_text=False)) == []
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="Quartz")
+def test_faint_printed_text_under_a_screen_only_box_is_found(tmp_path):
+    raw = str(tmp_path / "faint.raw.pdf")
+    c = canvas.Canvas(raw, pagesize=(612, 792))
+    c.setFillGray(0.9)  # light grey: easy to miss on paper, still printed
+    c.setFont("Helvetica-Bold", 14)
+    c.drawString(80, 600, "APPROVED: 90 DAYS EXCESS LEAVE")
+    c.showPage(); c.save()
+    pdf = pikepdf.open(raw)
+    ap = pdf.make_stream(b"1 g 0 0 340 26 re f")
+    ap.Type, ap.Subtype, ap.BBox = pikepdf.Name.XObject, pikepdf.Name.Form, [0, 0, 340, 26]
+    pdf.pages[0].obj.Annots = pdf.make_indirect(pikepdf.Array([pdf.make_indirect(pikepdf.Dictionary(
+        Type=pikepdf.Name.Annot, Subtype=pikepdf.Name.Square, Rect=[70, 593, 410, 619], AP=pikepdf.Dictionary(N=ap)))]))
+    pdf.save(tmp_path / "faint.pdf")
+    assert any("shown on screen but not printed" in p for p in pdf_readers.reader_problems(str(tmp_path / "faint.pdf")))
+
+
+def _with_annotation(src, dst, **entries):
+    pdf = pikepdf.open(src)
+    annot = pdf.make_indirect(pikepdf.Dictionary(Type=pikepdf.Name.Annot, Rect=[100, 100, 300, 130], F=4, **entries))
+    pg = pdf.pages[0].obj
+    pg.Annots = pdf.make_indirect(pikepdf.Array(list(pg.get("/Annots", [])) + [annot]))
+    annot.P = pg
+    pdf.save(dst)
+    return str(dst)
+
+
+@pytest.mark.parametrize("entries,expect", [
+    (dict(Subtype=pikepdf.Name.FreeText, Contents=pikepdf.String("APPROVED"), DA=pikepdf.String("/Helv 12 Tf 0 g")),
+     "no drawing of their own"),
+    (dict(Subtype=pikepdf.Name.Popup, Open=True), "open by default"),
+])
+def test_annotations_other_viewers_draw_but_the_review_cannot_are_refused(tmp_path, entries, expect):
+    path = _with_annotation(_annotated_pdf(tmp_path / "a.pdf", flags=4), tmp_path / "b.pdf", **entries)
+    assert any(expect in p for p in pdf_readers.reader_problems(path))
+
+
+def test_a_field_value_with_no_drawing_is_refused(tmp_path, blank_form):
+    with pikepdf.open(blank_form, allow_overwriting_input=True) as pdf:
+        w = next(a for a in pdf.pages[0].obj.Annots if str(a.get("/T", "")) == "Name")
+        w.V = pikepdf.String("APPROVED")
+        del w["/AP"]
+        pdf.save(blank_form)
+    assert any("a value but no drawing" in p for p in pdf_readers.reader_problems(str(blank_form)))
+
+
+def test_screen_only_boxes_on_a_redrawn_form_are_refused(tmp_path):
+    path = _covered_pdf(tmp_path / "redrawn.pdf", "0.8 g", over_text=False)
+    with pikepdf.open(path, allow_overwriting_input=True) as pdf:
+        pdf.Root.AcroForm = pikepdf.Dictionary(Fields=pikepdf.Array(), NeedAppearances=True)
+        pdf.save(path)
+    assert any("redraw" in p for p in pdf_readers.reader_problems(path))
+
+
+def test_a_layer_that_does_not_print_is_never_signed(tmp_path):
+    """A cover drawn in page content inside a layer that is on for screen but marked not to print."""
+    path = _annotated_pdf(tmp_path / "oc.pdf", flags=4)
+    with pikepdf.open(path, allow_overwriting_input=True) as pdf:
+        ocg = pdf.make_indirect(pikepdf.Dictionary(Type=pikepdf.Name.OCG, Name=pikepdf.String("cover"),
+                                                   Usage=pikepdf.Dictionary(Print=pikepdf.Dictionary(PrintState=pikepdf.Name.OFF))))
+        pdf.Root.OCProperties = pikepdf.Dictionary(OCGs=pikepdf.Array([ocg]), D=pikepdf.Dictionary(ON=pikepdf.Array([ocg])))
+        pdf.save(path)
+    assert any("layers" in p for p in pdf_readers.reader_problems(path))
+
+
+def _layer_cover_pdf(path, usage, declare, table=True):
+    """Text, then a white cover in page content inside a layer referenced only from the page's resources."""
+    raw = str(path) + ".raw.pdf"
+    c = canvas.Canvas(raw, pagesize=(612, 792))
+    c.setFont("Helvetica-Bold", 14)
+    c.drawString(80, 600, "APPROVED: 90 DAYS EXCESS LEAVE")
+    c.showPage(); c.save()
+    pdf = pikepdf.open(raw)
+    ocg = pdf.make_indirect(pikepdf.Dictionary(Type=pikepdf.Name.OCG, Name=pikepdf.String("cover"), **usage))
+    pg = pdf.pages[0]
+    pg.obj.Resources.Properties = pikepdf.Dictionary(cover=ocg)
+    pg.contents_add(pdf.make_stream(b"/OC /cover BDC 1 g 70 593 340 26 re f EMC"), prepend=False)
+    if table:
+        pdf.Root.OCProperties = pikepdf.Dictionary(OCGs=pikepdf.Array([ocg] if declare else []),
+                                                   D=pikepdf.Dictionary(ON=pikepdf.Array([ocg])))
+    pdf.save(path)
+    return str(path)
+
+
+PRINT_OFF = dict(Usage=pikepdf.Dictionary(Print=pikepdf.Dictionary(PrintState=pikepdf.Name.OFF)))
+
+
+@pytest.mark.parametrize("declare,table", [(True, True), (False, True), (False, False)])
+def test_a_do_not_print_layer_is_refused_wherever_it_is_defined(tmp_path, declare, table):
+    path = _layer_cover_pdf(tmp_path / "l.pdf", PRINT_OFF, declare, table)
+    assert any("layers" in p for p in pdf_readers.reader_problems(path))
+
+
+def test_layer_walk_has_no_blind_spots(tmp_path):
+    """A resource named /P, a group with no /Type (judged by where it is used), a 300-deep chain, and a
+    non-dictionary in the layer table: each is still judged."""
+    def build(name, mutate):
+        path = _layer_cover_pdf(tmp_path / f"{name}.pdf", {}, declare=False, table=False)
+        with pikepdf.open(path, allow_overwriting_input=True) as pdf:
+            mutate(pdf)
+            pdf.save(path)
+        return path
+    def named_p(pdf):
+        props = pdf.pages[0].obj.Resources.Properties
+        props.P = pdf.make_indirect(pikepdf.Dictionary(Usage=pikepdf.Dictionary(Print=pikepdf.Dictionary(PrintState=pikepdf.Name.OFF))))
+    def untyped(pdf):
+        props = pdf.pages[0].obj.Resources.Properties
+        props.cover = pdf.make_indirect(pikepdf.Dictionary(Name=pikepdf.String("x"), Intent=pikepdf.Name.Design))
+    def deep(pdf):
+        node = pdf.make_indirect(pikepdf.Dictionary(Type=pikepdf.Name.OCG, **PRINT_OFF))
+        for _ in range(300):
+            node = pdf.make_indirect(pikepdf.Dictionary(Next=node))
+        pdf.pages[0].obj.Extra = node
+    def odd_entry(pdf):
+        pdf.Root.OCProperties = pikepdf.Dictionary(OCGs=pikepdf.Array([7]), D=pikepdf.Dictionary())
+    for name, mutate in (("named_p", named_p), ("untyped", untyped), ("deep", deep), ("odd", odd_entry)):
+        assert any("layers" in p for p in pdf_readers.reader_problems(build(name, mutate))), name
+
+
+def test_layer_rules_the_review_renderer_cannot_resolve_are_refused(tmp_path):
+    def build(name, mutate):
+        path = _layer_cover_pdf(tmp_path / f"{name}.pdf", {}, declare=True)
+        with pikepdf.open(path, allow_overwriting_input=True) as pdf:
+            mutate(pdf, pdf.pages[0].obj.Resources.Properties.cover)
+            pdf.save(path)
+        return path
+    def ve(pdf, g):
+        pdf.pages[0].obj.Resources.Properties.cover = pdf.make_indirect(pikepdf.Dictionary(
+            Type=pikepdf.Name.OCMD, OCGs=g, VE=pikepdf.Array([pikepdf.Name.Not, g])))
+    def alloff(pdf, g):
+        pdf.pages[0].obj.Resources.Properties.cover = pdf.make_indirect(pikepdf.Dictionary(
+            Type=pikepdf.Name.OCMD, OCGs=g, P=pikepdf.Name.AllOff))
+    def radio(pdf, g):
+        h = pdf.make_indirect(pikepdf.Dictionary(Type=pikepdf.Name.OCG, Name=pikepdf.String("h")))
+        pdf.Root.OCProperties.OCGs.append(h)
+        pdf.Root.OCProperties.D.RBGroups = pikepdf.Array([pikepdf.Array([g, h])])
+    def configs(pdf, g):
+        pdf.Root.OCProperties.Configs = pikepdf.Array([pikepdf.Dictionary(OFF=pikepdf.Array([g]))])
+    def single(pdf, g):  # an OCMD whose /OCGs is one untyped dictionary, not an array
+        pdf.pages[0].obj.Resources.Properties.cover = pdf.make_indirect(pikepdf.Dictionary(
+            Type=pikepdf.Name.OCMD, OCGs=pdf.make_indirect(pikepdf.Dictionary(Intent=pikepdf.Name.Design))))
+    for name, mutate in (("ve", ve), ("alloff", alloff), ("radio", radio), ("configs", configs), ("single", single)):
+        assert any("layers" in p for p in pdf_readers.reader_problems(build(name, mutate))), name
+
+
+def test_a_plain_layer_left_out_of_the_table_is_only_a_warning(tmp_path):
+    """Acrobat's Headers/Footers leave per-page groups out of /OCGs; that alone is not refused."""
+    path = _layer_cover_pdf(tmp_path / "hf.pdf", dict(Usage=pikepdf.Dictionary(PageElement=pikepdf.Dictionary(
+        Subtype=pikepdf.Name.HF))), declare=False)
+    assert pdf_readers.reader_problems(path) == []
+    assert any("has layers" in w for w in pdf_readers.viewer_warnings(path))
+
+
+def test_an_open_note_is_refused(tmp_path):
+    path = _annotated_pdf(tmp_path / "n.pdf", flags=4)
+    with pikepdf.open(path, allow_overwriting_input=True) as pdf:
+        pdf.pages[0].obj.Annots[0].Open = True
+        pdf.save(path)
+    assert any("open by default" in p for p in pdf_readers.reader_problems(path))
+
+
+def test_a_field_value_chain_that_loops_is_refused(tmp_path, blank_form):
+    with pikepdf.open(blank_form, allow_overwriting_input=True) as pdf:
+        w = next(a for a in pdf.pages[0].obj.Annots if str(a.get("/T", "")) == "Name")
+        del w["/AP"]
+        if "/V" in w:
+            del w["/V"]  # so the value has to come from the (looping) parents
+        a_ = pdf.make_indirect(pikepdf.Dictionary(T=pikepdf.String("a")))
+        b_ = pdf.make_indirect(pikepdf.Dictionary(T=pikepdf.String("b"), Parent=a_))
+        a_.Parent = b_
+        w.Parent = a_
+        pdf.save(blank_form)
+    with pikepdf.open(blank_form) as pdf:
+        assert any("a value but no drawing" in p for p in pdf_readers._undrawn_problems(pdf))
+
+
+def test_rich_text_comments_count_as_comments(tmp_path):
+    path = _annotated_pdf(tmp_path / "rc.pdf", flags=4)
+    with pikepdf.open(path, allow_overwriting_input=True) as pdf:
+        pdf.pages[0].obj.Annots[0].RC = pikepdf.String("<body><p>approved</p></body>")
+        pdf.save(path)
+    assert any("comment(s) carry text" in w for w in pdf_readers.viewer_warnings(path))
+
+
+def test_comment_text_is_a_warning(tmp_path):
+    path = _annotated_pdf(tmp_path / "c.pdf", flags=4)
+    with pikepdf.open(path, allow_overwriting_input=True) as pdf:
+        pdf.pages[0].obj.Annots[0].Contents = pikepdf.String("approved for 90 days")
+        pdf.save(path)
+    assert any("comment(s) carry text" in w for w in pdf_readers.viewer_warnings(path))
+
+
 def test_content_outside_the_crop_box_is_a_warning(tmp_path):
     path = _annotated_pdf(tmp_path / "cropped.pdf", flags=4)
     with pikepdf.open(path, allow_overwriting_input=True) as pdf:

@@ -280,6 +280,59 @@ def _orphan_widgets(pdf):
     return tuple(counts)
 
 
+def _screen_only_boxes(pdf):
+    """{page index: [rect, ...]} of annotations drawn on screen but not printed (no Print flag, not Hidden or
+    NoView, with a normal appearance). Harmless over an empty area (a Print or Reset button); over anything
+    that prints, they hide it from the review while the printout shows it."""
+    import pikepdf
+    out = {}
+    for i, pg in enumerate(pdf.pages):
+        for a in pg.obj.get("/Annots", []) or []:
+            if not isinstance(a, pikepdf.Dictionary):
+                continue
+            flags = int(a.get("/F", 0))
+            ap = a.get("/AP")
+            if flags & (2 | 32) or flags & 4 or not isinstance(ap, pikepdf.Dictionary) or "/N" not in ap:
+                continue
+            r = [float(v) for v in list(a.get("/Rect") or [])[:4]]
+            if len(r) == 4:
+                out.setdefault(i, []).append((min(r[0], r[2]), min(r[1], r[3]), max(r[0], r[2]), max(r[1], r[3])))
+    return out
+
+
+def _boxes_in_render(cg, index, rects, scale):
+    """PDF-space rects on page `index` -> pixel boxes (left, top, right, bottom) in `_render`'s image."""
+    import Quartz
+    page = Quartz.CGPDFDocumentGetPage(cg, index + 1)
+    box = Quartz.CGPDFPageGetBoxRect(page, Quartz.kCGPDFCropBox)
+    w, h = box.size.width, box.size.height
+    if Quartz.CGPDFPageGetRotationAngle(page) % 180:
+        w, h = h, w
+    t = Quartz.CGPDFPageGetDrawingTransform(page, Quartz.kCGPDFCropBox, ((0, 0), (w, h)), 0, True)
+    H = int(h * scale)
+    out = []
+    for x1, y1, x2, y2 in rects:
+        pts = [Quartz.CGPointApplyAffineTransform((x, y), t) for x in (x1, x2) for y in (y1, y2)]
+        xs, ys = [p.x * scale for p in pts], [H - p.y * scale for p in pts]
+        out.append((min(xs), min(ys), max(xs), max(ys)))
+    return out
+
+
+def _covered_print(print_doc, boxes_by_page, scale=2.0, inset=3):
+    """How many screen-only boxes sit over something in the printed view (any non-uniform pixels)."""
+    from PIL import Image
+    covered = 0
+    for i, rects in boxes_by_page.items():
+        img = Image.open(io.BytesIO(_render(print_doc, i, scale))).convert("L")
+        for l, t, r, b in _boxes_in_render(print_doc, i, rects, scale):
+            l, t = max(int(l) + inset, 0), max(int(t) + inset, 0)
+            r, b = min(int(r) - inset, img.width), min(int(b) - inset, img.height)
+            if r > l and b > t:
+                lo, hi = img.crop((l, t, r, b)).getextrema()
+                covered += hi - lo > 10  # vector renders are flat; any visible mark under the box counts
+    return covered
+
+
 def _misplaced_annotations(pdf):
     """Annotations on a page other than the one their /P names, on several pages, or not dictionaries at
     all. Viewers that place by /Annots (as the review does) and viewers that place by /P (or by a form's
@@ -302,9 +355,148 @@ def _misplaced_annotations(pdf):
     return bad
 
 
+# Annotation types a viewer draws from their own data (text, colours, points) when they carry no appearance.
+_DRAWN_WITHOUT_AP = {"/FreeText", "/Square", "/Circle", "/Line", "/Polygon", "/PolyLine", "/Ink", "/Highlight",
+                     "/Underline", "/Squiggly", "/StrikeOut", "/Stamp", "/Caret", "/Text", "/FileAttachment",
+                     "/Sound", "/Redact", "/Watermark"}
+
+
+def _undrawn_problems(pdf):
+    """Visible things another viewer draws but the review cannot, because they carry no appearance of their
+    own: markup with no /AP /N, field values with no drawing, and comments set to open by default.
+    None of 177 real PDFs has one."""
+    import pikepdf
+    markup = values = opened = 0
+    for pg in pdf.pages:
+        for a in pg.obj.get("/Annots", []) or []:
+            if not isinstance(a, pikepdf.Dictionary) or int(a.get("/F", 0)) & (2 | 32):
+                continue
+            sub = str(a.get("/Subtype", ""))
+            ap = a.get("/AP")
+            drawn = isinstance(ap, pikepdf.Dictionary) and "/N" in ap
+            popup = a.get("/Popup")
+            if bool(a.get("/Open", False)) or (isinstance(popup, pikepdf.Dictionary) and bool(popup.get("/Open", False))):
+                opened += 1  # a note or its popup shown open: its text is on screen in other viewers
+            if sub == "/Widget" and not drawn:
+                node, v, seen = a, None, set()
+                while True:  # the value may be inherited from a parent field
+                    if not isinstance(node, pikepdf.Dictionary) or (node.is_indirect and node.objgen in seen) \
+                            or len(seen) > 64:
+                        v = "unresolvable"  # a cycle or a broken chain: fail closed
+                        break
+                    if node.is_indirect:
+                        seen.add(node.objgen)
+                    if "/V" in node:
+                        v = node.V
+                        break
+                    if "/Parent" not in node:
+                        break
+                    node = node.Parent
+                values += v is not None and str(v) not in ("", "/Off")
+            elif sub in _DRAWN_WITHOUT_AP and not drawn:
+                markup += 1
+    out = []
+    if markup:
+        out.append(f"{markup} annotation(s) have no drawing of their own, so other viewers draw them and this "
+                   "review can't")
+    if values:
+        out.append(f"{values} form field(s) have a value but no drawing of it, so other viewers show a value "
+                   "this review can't")
+    if opened:
+        out.append(f"{opened} comment(s) open by default in other viewers, and this review can't show their text")
+    return out
+
+
+def _optional_content(pdf):
+    """Every layer (OCG) the pages or the layer table can reach, and how many layer slots hold something
+    that isn't a dictionary. Returns (groups, odd).
+
+    A breadth-first walk over every key (no key is skipped, no depth cap; the seen set bounds it). An
+    object counts as a layer by where it is referenced, not only by /Type: the layer table's /OCGs,
+    any /OC value, any entry of a /Properties map, and the members of an OCMD (/OCGs, /VE). The table
+    can leave groups out and a page can define one inline, so neither is trusted alone. Undeclared
+    leftovers that nothing reaches (Acrobat edits leave some) draw nothing and are ignored.
+    """
+    import collections
+    import pikepdf
+    groups, seen, odd = [], set(), 0
+    queue = collections.deque()  # (object, role): role is None, "group", "list" (of groups) or "map" (of groups)
+    for pg in pdf.pages:
+        queue.append((pg.obj, None))
+    oc = pdf.Root.get("/OCProperties")
+    if isinstance(oc, pikepdf.Dictionary):
+        queue.append((oc, None))
+        queue.append((oc.get("/OCGs", pikepdf.Array()), "list"))
+    while queue:
+        x, role = queue.popleft()
+        if not isinstance(x, pikepdf.Object):
+            odd += role == "group"  # a number or bool where a layer should be
+            continue
+        if x.is_indirect:
+            if (x.objgen, role) in seen:
+                continue
+            seen.add((x.objgen, role))
+        if isinstance(x, pikepdf.Array):
+            for v in x:
+                queue.append((v, "group" if role in ("list", "group") else None) if not isinstance(v, pikepdf.Array)
+                             else (v, "list" if role in ("list", "group") else None))
+            continue
+        if not isinstance(x, (pikepdf.Dictionary, pikepdf.Stream)):
+            odd += role == "group" and not isinstance(x, pikepdf.Name)  # names in /VE expressions are operators
+            continue
+        kind = str(x.get("/Type", ""))
+        if role == "map":
+            for k in list(x.keys()):
+                queue.append((x.get(k), "group"))
+            continue
+        if kind == "/OCMD":
+            # CoreGraphics, the review's renderer, doesn't resolve visibility expressions or policies the way
+            # the spec (and Acrobat) does; only the default "any member on" is safe to trust. Real OCMDs use it.
+            odd += "/VE" in x or str(x.get("/P", "/AnyOn")) != "/AnyOn"
+            queue.append((x.get("/OCGs", pikepdf.Array()), "list"))
+            queue.append((x.get("/VE", pikepdf.Array()), "list"))
+        elif role in ("group", "list") or kind == "/OCG" or "/Usage" in x:  # /OCGs may be one dictionary
+            groups.append(x)
+        for k in list(x.keys()):
+            name = str(k)
+            child = "group" if name == "/OC" else "map" if name == "/Properties" else None
+            queue.append((x.get(k), child))
+    return groups, odd
+
+
+def _layer_problems(pdf):
+    """Layers that can make the review differ from what other viewers show or print."""
+    import pikepdf
+    groups, odd = _optional_content(pdf)
+    oc = pdf.Root.get("/OCProperties")
+    if not groups and not odd and oc is None:
+        return []
+    informational = {"/CreatorInfo", "/Language", "/Export", "/User", "/PageElement"}
+
+    def viewed(intent):  # an intent (name or array) that includes /View, which every viewer applies
+        names = [intent] if isinstance(intent, pikepdf.Name) else list(intent or [])
+        return intent is None or "/View" in [str(n) for n in names]
+    d = oc.get("/D") if isinstance(oc, pikepdf.Dictionary) else None
+    d = d if isinstance(d, pikepdf.Dictionary) else pikepdf.Dictionary()
+    # Judged on what a group does, not on whether the layer table lists it: Acrobat's Headers/Footers
+    # leave per-page groups out of /OCGs (3 real forms), and a group outside the table or with no table at
+    # all is still checked here because the walk starts from the pages.
+    bad = odd or any(isinstance(g.get("/Usage"), pikepdf.Dictionary) and any(str(k) not in informational for k in g.Usage.keys())
+              or ("/Usage" in g and not isinstance(g.get("/Usage"), pikepdf.Dictionary))
+              or not viewed(g.get("/Intent")) for g in groups)
+    bad = bad or len(d.get("/OFF", []) or []) or str(d.get("/BaseState", "/ON")) != "/ON" \
+        or len(d.get("/AS", []) or []) or not viewed(d.get("/Intent")) \
+        or any(len(rb) > 1 for rb in (d.get("/RBGroups", []) or []) if isinstance(rb, pikepdf.Array)) \
+        or (isinstance(oc, pikepdf.Dictionary) and len(oc.get("/Configs", []) or []))  # none of 177 real PDFs
+    return ["it has layers (optional content) that are switched off, or that show differently on screen "
+            "and in print"] if bad else []
+
+
 def _screen_print_problems(pdf):
     """What the screen view (and so the review) leaves out but a printout shows. pikepdf document."""
+    import pikepdf
     out, hidden_print = [], 0
+    out += _undrawn_problems(pdf)
     placed, _ = _orphan_widgets(pdf)
     if placed:
         out.append(f"{placed} form field box(es) name a page but are missing from it, so viewers disagree on "
@@ -320,12 +512,7 @@ def _screen_print_problems(pdf):
                 hidden_print += 1
     if hidden_print:
         out.append(f"{hidden_print} annotation(s) are hidden on screen but print, so this review cannot show them")
-    oc = pdf.Root.get("/OCProperties")
-    if oc is not None:
-        d = oc.get("/D") or {}
-        if len(d.get("/OFF", []) or []) or str(d.get("/BaseState", "/ON")) != "/ON" or len(d.get("/AS", []) or []):
-            out.append("it has layers (optional content) that are switched off, or that show differently on "
-                       "screen and in print")
+    out += _layer_problems(pdf)
     return out
 
 
@@ -362,6 +549,17 @@ def viewer_warnings(path):
         if doc_js or scripted:
             out.append("This PDF contains Acrobat scripts" + (f" on {scripted} field(s)" if scripted else "") +
                        "; Acrobat may reformat or recalculate values when it opens the file.")
+        comments = sum(1 for pg in pdf.pages for a in (pg.obj.get("/Annots", []) or [])
+                       if isinstance(a, pikepdf.Dictionary) and not int(a.get("/F", 0)) & (2 | 32)
+                       and str(a.get("/Subtype", "")) not in ("/Link", "/Widget", "/Popup", "/FreeText")
+                       and (len(str(a.get("/Contents", ""))) or len(str(a.get("/RC", "")))))
+        if comments:
+            out.append(f"{comments} comment(s) carry text this review doesn't show (other viewers open it on "
+                       "a click). Open them in Acrobat if they could matter.")
+        if _optional_content(pdf)[0]:
+            out.append("This PDF has layers. Other viewers can resolve layers differently from this review, "
+                       "or let readers switch them off, and either can show something a layer covers here. "
+                       "Check the file in Acrobat before signing.")
         _, unplaced = _orphan_widgets(pdf)
         if unplaced:
             out.append(f"{unplaced} form field(s) are on no page: this review can't show them, and common "
@@ -398,6 +596,18 @@ def _reader_problems(path, *stat_key):
                             "cannot show or fill")
         q_fields = _qpdf_fields(acro)
         problems += _screen_print_problems(pdf)
+        screen_only = _screen_only_boxes(pdf)
+        if screen_only and acro is not None and bool(acro.get("/NeedAppearances", False)):
+            # viewers redraw the fields, so the print view rendered here may be missing what they print
+            problems.append("it has boxes shown on screen but not printed, on a form that asks viewers to redraw "
+                            "its fields, so what they cover can't be checked")
+            screen_only = {}
+        if screen_only:
+            with pikepdf.open(io.BytesIO(data)) as printed:
+                printed.flatten_annotations("print")  # in memory only: what a printout shows
+                pbuf = io.BytesIO()
+                printed.save(pbuf)
+                print_view = pbuf.getvalue()
         buf = io.BytesIO()
         pdf.save(buf)
         resaved = buf.getvalue()
@@ -432,7 +642,14 @@ def _reader_problems(path, *stat_key):
         odd = sorted(set(h_fields) ^ set(q_fields)) or [n for n in h_fields if h_fields[n] != q_fields.get(n)]
         problems.append(f"qpdf and pyHanko disagree on the form fields (e.g. {str(odd[:3])[:120]})")
     if Quartz is None:
+        if screen_only:
+            problems.append("it has boxes shown on screen but not printed, which can only be checked on a Mac")
         return problems
+    if screen_only:
+        n = _covered_print(_cg_doc(print_view), screen_only)
+        if n:
+            problems.append(f"{n} box(es) shown on screen but not printed cover something that prints, so this "
+                            "review would hide it")
     cg = _cg_doc(data)
     if cg is None or Quartz.CGPDFDocumentGetNumberOfPages(cg) != q_pages:
         problems.append("Apple's PDF reader and qpdf disagree on the pages")
