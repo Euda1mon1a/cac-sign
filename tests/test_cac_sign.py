@@ -1150,3 +1150,41 @@ def test_unflagged_signing_needs_no_acknowledgement(tmp_path, editor):
     prep = json.loads(call(editor, "/api/prepare", {"f": 0, "mode": "sign", "field": "Signature", "values": {}})[2])
     assert prep["ok"] and prep["changes"] == []
     assert json.loads(call(editor, "/api/commit", {})[2])["ok"]
+
+
+# ---------- the packaged `cac-sign` command (pip, uv, Homebrew) ----------
+import cac_sign_launch  # noqa: E402
+
+
+def test_launcher_routes_to_each_front_end(monkeypatch):
+    seen = []
+    monkeypatch.setattr(cac_sign, "main", lambda argv: seen.append(("cli", argv)) or 0)
+    monkeypatch.setattr(cac_sign_finder, "main", lambda argv: seen.append(("finder", argv)) or 0)
+    monkeypatch.setattr(cac_sign_editor, "main", lambda argv: seen.append(("editor", argv)) or 0)
+    assert cac_sign_launch.cli(["form.pdf", "--dry-run"]) == 0
+    assert cac_sign_launch.cli(["--quick-action", "a.pdf"]) == 0
+    assert cac_sign_launch.cli(["--review", "--background", "a.pdf"]) == 0
+    assert seen == [("cli", ["form.pdf", "--dry-run"]), ("finder", ["a.pdf"]), ("editor", ["--background", "a.pdf"])]
+
+
+def test_setup_installs_quick_actions_that_call_the_installed_command(tmp_path, monkeypatch):
+    import plistlib, shlex
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert cac_sign_launch.setup([], refresh=False) == 0
+    services = tmp_path / "Library" / "Services"
+    for name, (args, script) in cac_sign_launch.ACTIONS.items():
+        with open(services / name / "Contents" / "document.wflow", "rb") as f:
+            cmd = plistlib.load(f)["actions"][0]["action"]["ActionParameters"]["COMMAND_STRING"]
+        assert script in cmd  # how install.sh and --remove recognise it as ours
+        assert f'exec {shlex.quote(cac_sign_launch._command())} {args} "$@"' in cmd
+    assert cac_sign_launch.setup(["--remove"], refresh=False) == 0
+    assert not any(services.iterdir())
+
+
+def test_setup_leaves_someone_elses_workflow_alone(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    theirs = tmp_path / "Library" / "Services" / "CAC Sign.workflow" / "Contents"
+    theirs.mkdir(parents=True)
+    (theirs / "document.wflow").write_text("my own automator thing")
+    assert cac_sign_launch.setup([], refresh=False) == 1
+    assert (theirs / "document.wflow").read_text() == "my own automator thing"

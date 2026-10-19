@@ -33,6 +33,19 @@ curl -fsSL https://raw.githubusercontent.com/Euda1mon1a/cac-sign/v0.1.0/install.
 Your details and signing log stay in `~/Library/Application Support/cac-sign`
 through updates and uninstalls. Delete that folder if you want them gone.
 
+**Other ways to install.** Each gives you the `cac-sign` command; then run
+`cac-sign --setup` once to add the Finder Quick Actions and your details
+(`cac-sign --setup --remove` takes the Quick Actions out again):
+
+```
+brew install euda1mon1a/tap/cac-sign      # Homebrew
+uv tool install cac-sign                  # uv (or: pipx install cac-sign)
+```
+
+The curl installer and Homebrew install the exact package versions pinned in
+`uv.lock`. uv and pip resolve current versions within the ranges in
+`pyproject.toml`.
+
 ## Sign a form from Finder
 
 Right-click a PDF, then **Quick Actions > CAC Sign…** (with the dots). If it isn't
