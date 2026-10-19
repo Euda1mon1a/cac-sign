@@ -265,6 +265,7 @@ digest never matched the bytes Acrobat wrote to the Mac through Citrix drive map
 | `profiles/*.json`, `identity.example.json` | Per-form profiles; template for `identity.json`. |
 | `install.sh` | Installer, updater and `--uninstall`. |
 | `cac_sign_launch.py` | The `cac-sign` command for PyPI/Homebrew installs: routing and `--setup`. |
+| `RELEASING.md`, `scripts/test-installer.sh`, `scripts/test-uv-install.sh` | The release checklist, and the scratch-HOME checks for the curl installer and a uv/PyPI install. |
 | `tests/test_cac_sign.py` | End-to-end tests on synthetic forms with throwaway certs: `uv run --with pytest pytest -q tests`. |
 | `pyproject.toml` / `uv.lock` / `requirements.txt` | Dependencies: reportlab, pikepdf, pyhanko[pkcs11], and on macOS pyobjc-framework-Security (native signing) and pyobjc-framework-Quartz (page rendering). |
 
