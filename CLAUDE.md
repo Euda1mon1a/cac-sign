@@ -17,6 +17,20 @@ digest never matched the bytes Acrobat wrote to the Mac through Citrix drive map
   to `~/Library/Services`, and adds one marked line to `~/.zshrc`. Both Quick Actions
   and `cac-sign.zsh` call `$HOME/.cac-sign/.venv/bin/python` directly, so nothing
   depends on PATH or on where a clone lives.
+- **Packaged installs (PyPI, Homebrew).** `cac_sign_launch.py` is the `cac-sign`
+  console script. The wheel (hatchling `force-include`) puts it in as the package
+  `cac_sign_app/__init__.py` with every module and data file beside it, unchanged;
+  it adds its own folder to `sys.path`, so the modules keep importing each other by
+  plain name and `HERE`-relative data (profiles, `editor.html`, Quick Action
+  templates) keeps working. It routes `--quick-action` and `--review` to the two
+  front ends, and `cac-sign --setup` copies the Quick Actions with their command
+  rewritten (plistlib) to `exec <installed cac-sign> --quick-action|--review`.
+  `_command()` uses the PATH link (Homebrew's bin, uv's `~/.local/bin`) so an
+  upgrade doesn't break them. The comment line names `cac_sign_finder.py` or
+  `cac_sign_editor.py`, which is how `install.sh` and `--setup --remove` recognise
+  them as ours. `requires-python >= 3.10`, `pyhanko >= 0.35`, `pikepdf >= 10`: older
+  versions behave differently in the checks. `[tool.uv] package = false` stays,
+  so the curl installer still runs the scripts in place.
 - **User data lives in `~/Library/Application Support/cac-sign`** (`APP_SUPPORT`):
   `identity.json` and `ledger.jsonl`, folder 0700, files 0600. Updates replace the
   code folder wholesale (keeping `.venv` and any extra `profiles/*.json`), so nothing
@@ -250,6 +264,7 @@ digest never matched the bytes Acrobat wrote to the Mac through Citrix drive map
 | `pdf_readers.py` | Page rendering (flattened annotations, Quartz) and `reader_problems`, the qpdf / pyHanko strict / CoreGraphics agreement gate. |
 | `profiles/*.json`, `identity.example.json` | Per-form profiles; template for `identity.json`. |
 | `install.sh` | Installer, updater and `--uninstall`. |
+| `cac_sign_launch.py` | The `cac-sign` command for PyPI/Homebrew installs: routing and `--setup`. |
 | `tests/test_cac_sign.py` | End-to-end tests on synthetic forms with throwaway certs: `uv run --with pytest pytest -q tests`. |
 | `pyproject.toml` / `uv.lock` / `requirements.txt` | Dependencies: reportlab, pikepdf, pyhanko[pkcs11], and on macOS pyobjc-framework-Security (native signing) and pyobjc-framework-Quartz (page rendering). |
 

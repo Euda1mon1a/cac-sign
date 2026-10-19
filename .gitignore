@@ -23,3 +23,6 @@ identity.json
 .DS_Store
 .~lock.*#
 *.tmp
+
+# Build output
+dist/
