@@ -91,7 +91,7 @@ def setup(argv, refresh=True):
         print("Removed the Finder Quick Actions. Your details and signing log are kept in "
               "~/Library/Application Support/cac-sign.")
         return 0
-    print('Added the Finder Quick Actions "CAC Sign" and "CAC Sign…": right-click a PDF > Quick Actions.')
+    print('Added the Finder Quick Actions "CAC Sign" and "CAC Sign…": right-click a PDF or DOCX > Quick Actions.')
     _identity()
     return 0
 

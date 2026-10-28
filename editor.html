@@ -152,6 +152,7 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 <footer class="bar foot">
   <span id="summary" class="muted"></span>
   <span class="spacer"></span>
+  <button id="textBtn" class="ghost" type="button">Add text</button>
   <button id="drawBtn" class="ghost" type="button">Draw a signature box</button>
   <button id="fillBtn" class="secondary" type="button">Save filled copy</button>
   <button id="signBtn" class="primary" type="button">Sign</button>
@@ -214,6 +215,7 @@ async function load(i) {
     vals[f.name] = ("proposed" in f && !f.readonly && !f.locked) ? f.proposed : f.value;
   }
   target = model.sign_target;
+  if (model.suggested_signature) place = { ...model.suggested_signature, detected: true };
   const b = $("banner");
   const prior = (model.signed_before || []).map((p) => `You already signed this exact file on ${p.when} → ${p.name}.`);
   const msgs = [model.blocked, ...prior, ...(model.notes || [])].filter(Boolean);
@@ -229,7 +231,7 @@ function renderPages() {
     const img = el("img"); img.alt = `Page ${pi + 1}`; box.appendChild(img);
     api(`/api/page?f=${cur}&p=${pi}`).then((r) => r.blob()).then((bl) => { const u = URL.createObjectURL(bl); urls.push(u); img.src = u; }).catch(() => {});
     for (const f of model.fields) f.widgets.forEach((w, wi) => { if (w.page === pi) box.appendChild(overlay(f, w, wi)); });
-    if (place && place.page === pi) box.appendChild(newBox(place.box));
+    if (place && place.page === pi) box.appendChild(newBox(place.box, place.label || "New signature box"));
     box.addEventListener("pointerdown", (e) => startDraw(e, box, pi));
     wrap.appendChild(box);
   });
@@ -258,14 +260,14 @@ function overlay(f, w, wi) {
   if (f.kind === "checkbox") { o.classList.add("cb"); if (dirty) o.textContent = v ? "✓" : ""; }
   else if (f.kind === "radio") { o.classList.add("cb"); if (dirty) o.textContent = v && v === w.option ? "●" : ""; }
   else { if (f.multiline) o.classList.add("multi"); if (dirty) o.appendChild(el("span", "t", v || "")); }
-  o.title = f.name;
+  o.title = f.label || f.name;
   o.addEventListener("click", () => { if (!drawing) focusField(f.name); });
   o.addEventListener("mouseenter", () => mark(f.name, true));
   o.addEventListener("mouseleave", () => mark(f.name, false));
   return o;
 }
 
-function newBox(b) { const n = el("div", "newbox"); pos(n, b); n.appendChild(el("span", "sigt", "New signature box")); return n; }
+function newBox(b, label = "New signature box") { const n = el("div", "newbox"); pos(n, b); n.appendChild(el("span", "sigt", label)); return n; }
 
 function fitText() {
   requestAnimationFrame(() => document.querySelectorAll(".ov").forEach((o) => {
@@ -311,7 +313,8 @@ function renderSide() {
   }
   if (place) {
     const r = el("div", "sigrow"); const rb = el("input"); rb.type = "radio"; rb.checked = true; rb.disabled = true;
-    const body = el("div"); body.append(el("div", "who", "New signature box"), el("div", "detail", `Drawn on page ${place.page + 1}`));
+    const body = el("div"); body.append(el("div", "who", place.label || "New signature box"),
+      el("div", "detail", `${place.detected ? "Detected" : "Drawn"} on page ${place.page + 1}`));
     const clr = el("button", "mini", "Remove"); clr.type = "button"; clr.addEventListener("click", () => { place = null; refresh(); });
     r.append(rb, body, clr); sp.appendChild(r);
   }
@@ -334,7 +337,7 @@ function renderSide() {
 function fieldRow(f, w, st) {
   const row = el("div", "field"); row.dataset.name = f.name;
   const top = el("div", "frow");
-  top.append(el("span", "fname", f.name), el("span", `badge b-${st}`, f.readonly && !f.locked ? "Read-only" : LABEL[st]));
+  top.append(el("span", "fname", f.label || f.name), el("span", `badge b-${st}`, f.readonly && !f.locked ? "Read-only" : LABEL[st]));
   if (w) top.appendChild(el("span", "pg", `p${w.page + 1}`));
   row.appendChild(top);
   const ctl = el("div", "fctl");
@@ -342,6 +345,7 @@ function fieldRow(f, w, st) {
   const set = (v) => { vals[f.name] = v; refreshField(f); };
   if (f.kind === "checkbox") {
     const lab = el("label"); const cb = el("input"); cb.type = "checkbox"; cb.checked = !!vals[f.name]; cb.disabled = off;
+    cb.setAttribute("aria-label", f.label || f.name);
     cb.addEventListener("change", () => set(cb.checked)); lab.append(cb, document.createTextNode(" Checked")); ctl.appendChild(lab);
   } else if (f.kind === "radio") {
     const seg = el("div", "seg");
@@ -358,7 +362,7 @@ function fieldRow(f, w, st) {
   } else {
     const inp = f.multiline ? el("textarea") : el("input");
     if (!f.multiline) inp.type = "text";
-    inp.value = vals[f.name] || ""; inp.disabled = off; inp.setAttribute("aria-label", f.name);
+    inp.value = vals[f.name] || ""; inp.disabled = off; inp.setAttribute("aria-label", f.label || f.name);
     if (f.maxlen) inp.maxLength = f.maxlen;
     inp.addEventListener("input", () => set(inp.value));
     inp.addEventListener("focus", () => mark(f.name, true));
@@ -375,6 +379,14 @@ function fieldRow(f, w, st) {
     u.addEventListener("click", () => { vals[f.name] = orig[f.name]; refresh(); }); ctl.appendChild(u);
   }
   row.appendChild(ctl);
+  if (f.added) {
+    const remove = el("button", "mini", "Remove field"); remove.type = "button";
+    remove.addEventListener("click", () => {
+      model.fields = model.fields.filter((x) => x.name !== f.name);
+      delete vals[f.name]; delete orig[f.name]; refresh();
+    });
+    row.appendChild(remove);
+  }
   row.addEventListener("mouseenter", () => mark(f.name, true));
   row.addEventListener("mouseleave", () => mark(f.name, false));
   return row;
@@ -410,6 +422,10 @@ function changes() {
   return c;
 }
 
+function additions() {
+  return model.fields.filter((f) => f.added).map((f) => ({ name: f.name, kind: f.kind, label: f.label || f.name, ...f.widgets[0] }));
+}
+
 function summary() {
   const fs = model.fields.filter((f) => f.kind !== "signature" && !f.readonly && !f.locked);
   const blanks = fs.filter((f) => blank(f, vals[f.name])), req = blanks.filter((f) => f.required);
@@ -420,15 +436,18 @@ function summary() {
   $("summary").textContent = parts.join(" · ");
   $("signBtn").disabled = !!model.blocked || !where;
   $("fillBtn").disabled = !n;
-  $("drawBtn").textContent = drawing ? "Drag on the page…" : "Draw a signature box";
+  $("drawBtn").textContent = drawing === "signature" ? "Drag on the page…" : "Draw a signature box";
+  $("textBtn").textContent = drawing === "text" ? "Drag where the text goes…" : "Add text";
+  $("textBtn").disabled = !!model.blocked || model.fields.some((f) => f.kind === "signature" && f.signature);
 }
 
 function startDraw(e, box, pi) {
   if (!drawing) return;
+  const kind = drawing;
   e.preventDefault();
   const r = box.getBoundingClientRect();
   const x0 = (e.clientX - r.left) / r.width, y0 = (e.clientY - r.top) / r.height;
-  const nb = newBox([x0, y0, x0, y0]); box.appendChild(nb);
+  const nb = newBox([x0, y0, x0, y0], kind === "text" ? "New text box" : "New signature box"); box.appendChild(nb);
   const move = (ev) => {
     const x = Math.min(1, Math.max(0, (ev.clientX - r.left) / r.width)), y = Math.min(1, Math.max(0, (ev.clientY - r.top) / r.height));
     pos(nb, [Math.min(x0, x), Math.min(y0, y), Math.max(x0, x), Math.max(y0, y)]);
@@ -438,15 +457,31 @@ function startDraw(e, box, pi) {
     window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", up);
     const b = nb.dataset.box ? JSON.parse(nb.dataset.box) : null;
     drawing = false; document.querySelectorAll(".page").forEach((p) => p.classList.remove("drawing"));
-    if (b && (b[2] - b[0]) * r.width > 40 && (b[3] - b[1]) * r.height > 14) { place = { page: pi, box: b }; target = null; }
+    let added = null;
+    if (b && (b[2] - b[0]) * r.width > (kind === "text" ? 10 : 40) && (b[3] - b[1]) * r.height > 10) {
+      if (kind === "text") {
+        let n = 1;
+        while (model.fields.some((f) => f.name === `AddedText${n}`)) n++;
+        added = `AddedText${n}`;
+        model.fields.push({ name: added, kind: "text", value: "", widgets: [{ page: pi, box: b }],
+          readonly: false, locked: false, required: false, multiline: false, editable: true, added: true });
+        vals[added] = ""; orig[added] = "";
+      } else { place = { page: pi, box: b }; target = null; }
+    }
     refresh();
+    if (added) focusField(added);
   };
   window.addEventListener("pointermove", move); window.addEventListener("pointerup", up);
 }
 
 $("drawBtn").addEventListener("click", () => {
-  drawing = !drawing;
-  document.querySelectorAll(".page").forEach((p) => p.classList.toggle("drawing", drawing));
+  drawing = drawing === "signature" ? false : "signature";
+  document.querySelectorAll(".page").forEach((p) => p.classList.toggle("drawing", !!drawing));
+  summary();
+});
+$("textBtn").addEventListener("click", () => {
+  drawing = drawing === "text" ? false : "text";
+  document.querySelectorAll(".page").forEach((p) => p.classList.toggle("drawing", !!drawing));
   summary();
 });
 $("blankOnly").addEventListener("change", renderSide);
@@ -460,10 +495,10 @@ async function run(mode) {
   if (mode === "fill") {
     modal((c) => { c.append(el("div", "spin"), el("h3", null, "Saving…")); });
     let res;
-    try { res = await (await api("/api/fill", { f: cur, values: changes() })).json(); } catch (e) { res = { ok: false, text: e.message }; }
+    try { res = await (await api("/api/fill", { f: cur, values: changes(), additions: additions() })).json(); } catch (e) { res = { ok: false, text: e.message }; }
     return showResult(res, "fill");
   }
-  const body = { f: cur, mode: place ? "place" : "sign", values: changes() };
+  const body = { f: cur, mode: place ? "place" : "sign", values: changes(), additions: additions() };
   if (place) { body.page = place.page; body.box = place.box; } else body.field = target;
   modal((c) => { c.append(el("div", "spin"), el("h3", null, "Preparing the exact copy to sign…")); });
   let prep;

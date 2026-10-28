@@ -49,7 +49,7 @@ Safety:
   process list. No secrets are ever written to the log.
 """
 from __future__ import annotations
-import argparse, hashlib, hmac, json, os, secrets, shutil, subprocess, sys, tempfile, time
+import argparse, hashlib, hmac, io, json, os, re, secrets, shutil, subprocess, sys, tempfile, time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -209,6 +209,9 @@ def _form_model(path, profiles, identity, disagree):
                     "required": bool(ff & FF_REQUIRED), "multiline": bool(ff & cac_sign.FF_MULTILINE),
                     "maxlen": int(fld.inh["/MaxLen"]) if "/MaxLen" in fld.inh else None,
                     "editable": "=" not in name}
+            label = cac_sign._get(fld.obj, "/TU")
+            if label:
+                item["label"] = str(label)
             if kind == "radio":
                 item["options"] = sorted({w["option"] for w in widgets if w.get("option")})
             if kind == "choice":
@@ -302,13 +305,22 @@ def _shown(text, *paths):
     return text
 
 
-def fill_copy(path, request, extra_args=()):
+def fill_copy(path, request, extra_args=(), _out=None):
     """Save a filled, unsigned copy next to the original."""
+    if request.get("additions"):
+        with tempfile.TemporaryDirectory(prefix="cac-sign-") as folder:
+            snap, _ = _snapshot(path, folder)
+            try:
+                _add_text_fields(snap, request["additions"])
+            except ValueError as e:
+                return {"ok": False, "text": str(e)}
+            changed = dict(request, additions=[])
+            return fill_copy(snap, changed, extra_args, _out=free_output(path, "_filled"))
     model = form_model(path)
     sets, err = _sets(model, request.get("values"))
     if err:
         return {"ok": False, "text": err}
-    out = free_output(path, "_filled")
+    out = _out or free_output(path, "_filled")
     rc, text = run_cli([path, "--no-profile-fill", *sets, "--no-sign", "-o", out, *extra_args])
     res = {"ok": rc == 0 and os.path.exists(out), "text": _shown(text, path, out)}
     if res["ok"]:
@@ -342,6 +354,97 @@ def _remove(*paths):
     for p in paths:
         if p and os.path.exists(p):
             os.remove(p)
+
+
+def _add_text_fields(path, additions):
+    """Add text boxes or checkboxes to an unsigned private snapshot only."""
+    import math
+    from pyhanko.pdf_utils import generic as g
+    from pyhanko.pdf_utils.incremental_writer import IncrementalPdfFileWriter
+    if not isinstance(additions, list) or len(additions) > 100:
+        raise ValueError("Add at most 100 text boxes at a time.")
+    if verify_signatures(path):
+        raise ValueError("Add text boxes before the document has any signatures.")
+    geo, _ = page_geometry(path)
+    data = io.BytesIO()
+    with open(path, "rb") as source:
+        writer = IncrementalPdfFileWriter(source)
+        acro = cac_sign._get(writer.root, "/AcroForm")
+        if acro is None:
+            acro = g.DictionaryObject({g.NameObject("/Fields"): g.ArrayObject()})
+            writer.root[g.NameObject("/AcroForm")] = writer.add_object(acro)
+            writer.update_root()
+        fields = cac_sign._get(acro, "/Fields")
+        if fields is None:
+            fields = g.ArrayObject()
+            acro[g.NameObject("/Fields")] = fields
+        names = set(cac_sign.walk_fields(acro))
+        for item in additions:
+            if not isinstance(item, dict):
+                raise ValueError("A new text box must describe its name, page and rectangle.")
+            name = item.get("name")
+            if not isinstance(name, str) or not re.fullmatch(r"AddedText[1-9][0-9]{0,3}", name) or name in names:
+                raise ValueError("A new text box has an invalid or duplicate name.")
+            kind, label = item.get("kind", "text"), item.get("label", name)
+            if kind not in ("text", "checkbox") or not isinstance(label, str) or len(label) > 240:
+                raise ValueError("A new field must be a text box or checkbox with a short label.")
+            page, box = item.get("page"), item.get("box")
+            if (type(page) is not int or not 0 <= page < len(geo) or not isinstance(box, list)
+                    or len(box) != 4 or any(type(v) not in (int, float) or not math.isfinite(v) for v in box)
+                    or not (0 <= box[0] < box[2] <= 1 and 0 <= box[1] < box[3] <= 1)):
+                raise ValueError("Draw each text box inside a document page.")
+            rect = from_display(geo[page], box)
+            page_ref, _ = writer.find_page_for_modification(page)
+            widget = g.DictionaryObject({
+                g.NameObject("/Type"): g.NameObject("/Annot"),
+                g.NameObject("/Subtype"): g.NameObject("/Widget"),
+                g.NameObject("/FT"): g.NameObject("/Btn" if kind == "checkbox" else "/Tx"),
+                g.NameObject("/T"): g.TextStringObject(name),
+                g.NameObject("/TU"): g.TextStringObject(label),
+                g.NameObject("/V"): g.TextStringObject(""),
+                g.NameObject("/DA"): g.TextStringObject("/Helv 0 Tf 0 g"),
+                g.NameObject("/F"): g.NumberObject(4),
+                g.NameObject("/Rect"): g.ArrayObject(g.FloatObject(v) for v in rect),
+                g.NameObject("/P"): page_ref,
+            })
+            width, height = rect[2] - rect[0], rect[3] - rect[1]
+            if kind == "checkbox":
+                def appearance(checked):
+                    ops = b"q Q"
+                    if checked:
+                        inset = min(width, height) * 0.18
+                        ops = (f"q 0 G 0.9 w {inset} {inset} m {width-inset} {height-inset} l "
+                               f"{inset} {height-inset} m {width-inset} {inset} l S Q").encode("ascii")
+                    return writer.add_object(g.StreamObject({
+                        g.NameObject("/Type"): g.NameObject("/XObject"),
+                        g.NameObject("/Subtype"): g.NameObject("/Form"),
+                        g.NameObject("/BBox"): g.ArrayObject(g.FloatObject(v) for v in (0, 0, width, height)),
+                        g.NameObject("/Resources"): g.DictionaryObject(),
+                    }, stream_data=ops))
+                widget[g.NameObject("/V")] = g.NameObject("/Off")
+                widget[g.NameObject("/AS")] = g.NameObject("/Off")
+                widget[g.NameObject("/AP")] = g.DictionaryObject({g.NameObject("/N"): g.DictionaryObject({
+                    g.NameObject("/Off"): appearance(False), g.NameObject("/Yes"): appearance(True)})})
+            else:
+                empty = writer.add_object(g.StreamObject({
+                    g.NameObject("/Type"): g.NameObject("/XObject"),
+                    g.NameObject("/Subtype"): g.NameObject("/Form"),
+                    g.NameObject("/BBox"): g.ArrayObject(g.FloatObject(v) for v in (0, 0, width, height)),
+                    g.NameObject("/Resources"): g.DictionaryObject(),
+                }, stream_data=b"q Q"))
+                widget[g.NameObject("/AP")] = g.DictionaryObject({g.NameObject("/N"): empty})
+            # Rotated text entry needs its own text orientation; refuse until supported.
+            if geo[page]["rot"]:
+                raise ValueError("Add text currently needs an unrotated page.")
+            ref = writer.add_object(widget)
+            fields.append(ref)
+            writer.register_annotation(page_ref, ref)
+            names.add(name)
+        writer.update_container(fields)
+        writer.update_container(acro)
+        writer.write(data)
+    with open(path, "wb") as dest:
+        dest.write(data.getvalue())
 
 
 def _blank(f, v):
@@ -384,7 +487,7 @@ def describe_changes(model, values):
                     break
         if prof is not None and not in_profile:
             flags.append("not one of the boxes this form's profile fills")
-        out.append({"name": name, "from": _say_value(f, f["value"]), "to": _say_value(f, new), "flags": flags})
+        out.append({"name": f.get("label") or name, "from": _say_value(f, f["value"]), "to": _say_value(f, new), "flags": flags})
     return out
 
 
@@ -403,6 +506,15 @@ def prepare(path, request, stage_dir, extra_args=()):
     model = form_model(snap)
     if model["blocked"]:
         return fail(model["blocked"])
+    if request.get("additions"):
+        try:
+            _add_text_fields(snap, request["additions"])
+        except ValueError as e:
+            return fail(str(e))
+        snap_sha = _sha256(snap)
+        model = form_model(snap)
+        if model["blocked"]:
+            return fail(model["blocked"])
     sets, err = _sets(model, request.get("values"))
     if err:
         return fail(err)
@@ -494,9 +606,32 @@ def sign_direct(path, request, extra_args=()):
 
 # ---------- the local server ----------
 
+def review_model(path):
+    """Suggest fields without changing the source or relaxing any signing gate."""
+    model = form_model(path)
+    try:
+        from field_detection import suggest_fields
+        fields, signatures = suggest_fields(path, model, page_geometry(path)[0], to_display)
+    except Exception:
+        model["notes"] = [*(model.get("notes") or []),
+                          "Automatic field detection could not read this file. Use Add text to place fields manually."]
+        return model
+    if fields or signatures:
+        model["fields"].extend(fields)
+        if len(signatures) == 1 and not model.get("sign_target"):
+            model["suggested_signature"] = signatures[0]
+        model["notes"] = [*(model.get("notes") or []),
+                          f"Detected {len(fields)} fields and {len(signatures)} signature line(s). "
+                          "Check their positions and labels; remove any incorrect fields. Checkbox choices start unchecked."]
+    return model
+
 class Editor:
     def __init__(self, files, extra_args=(), idle=IDLE_SECONDS):
-        self.files = [os.path.abspath(p) for p in files]
+        from document_inputs import pdf_input, conversion_note
+        sources = [os.path.abspath(p) for p in files]
+        self.files = [pdf_input(p) for p in sources]
+        self.input_notes = {i: conversion_note(src, pdf) for i, (src, pdf) in enumerate(zip(sources, self.files))
+                            if src.lower().endswith(".docx")}
         self.extra = list(extra_args)
         self.token = secrets.token_urlsafe(32)
         self.idle = idle
@@ -581,7 +716,11 @@ class Editor:
                     if u.path == "/api/files":
                         return self._json([{"index": i, "name": os.path.basename(p)} for i, p in enumerate(ed.files)])
                     if u.path == "/api/form":
-                        return self._json(form_model(self._file(q)[1]))
+                        i, path = self._file(q)
+                        model = review_model(path)
+                        if i in ed.input_notes:
+                            model["notes"] = [ed.input_notes[i], *(model.get("notes") or [])]
+                        return self._json(model)
                     if u.path == "/api/page":
                         return self._send(200, render_page(self._file(q)[1], int(q.get("p", ["0"])[0])), "image/png")
                     if u.path == "/api/preview":
@@ -650,15 +789,16 @@ class Editor:
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description="Review, fill and CAC-sign PDFs in the browser.")
+    ap = argparse.ArgumentParser(description="Convert DOCX locally, enter information and CAC-sign a PDF in the browser.")
     ap.add_argument("files", nargs="+")
     ap.add_argument("--background", action="store_true", help="Start the page server and return at once.")
     ap.add_argument("--no-browser", action="store_true", help="Print the URL instead of opening it.")
     ap.add_argument("--opensc", action="store_true", help="Sign through OpenSC instead of macOS (see cac_sign.py).")
     args = ap.parse_args(argv)
-    files = [os.path.abspath(p) for p in args.files if p.lower().endswith(".pdf") and os.path.isfile(p)]
-    if not files:
-        ap.error("give one or more PDF files")
+    from document_inputs import supported
+    files = [os.path.abspath(p) for p in args.files]
+    if any(not supported(p) or not os.path.isfile(p) for p in files):
+        ap.error("give existing PDF or DOCX files")
     if args.background and args.no_browser:
         ap.error("--no-browser prints the page's key, so it only runs in the foreground")
     extra = ["--opensc"] if args.opensc else []
@@ -670,7 +810,14 @@ def main(argv=None):
                          start_new_session=True, cwd=HERE)
         os.close(fd)
         return 0
-    ed = Editor(files, extra)
+    try:
+        ed = Editor(files, extra)
+    except Exception as e:
+        from cac_sign_finder import notify
+        text = cac_sign.printable(f"Could not open the document: {e}")
+        if not args.no_browser:
+            notify(text)
+        ap.error(text)
     if args.no_browser:
         print(ed.url, flush=True)
     else:

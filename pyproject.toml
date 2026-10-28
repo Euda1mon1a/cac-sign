@@ -1,11 +1,11 @@
 [project]
 name = "cac-sign"
-version = "0.1.0"
-description = "Fill, CAC-sign and verify PDFs on a Mac, with Finder Quick Actions and a review page."
+version = "0.2.0"
+description = "Convert Word forms to PDF, detect fields, fill and CAC-sign locally on a Mac."
 readme = "README.md"
 license = "MIT"
 authors = [{ name = "Aaron Montgomery" }]
-keywords = ["cac", "pdf", "digital signature", "smart card", "piv", "macos"]
+keywords = ["cac", "pdf", "docx", "digital signature", "smart card", "piv", "macos"]
 classifiers = [
     "Environment :: MacOS X",
     "Intended Audience :: End Users/Desktop",
@@ -50,6 +50,8 @@ core-metadata-version = "2.4"
 "cac_sign_editor.py" = "cac_sign_app/cac_sign_editor.py"
 "cac_sign_finder.py" = "cac_sign_app/cac_sign_finder.py"
 "pdf_readers.py" = "cac_sign_app/pdf_readers.py"
+"document_inputs.py" = "cac_sign_app/document_inputs.py"
+"field_detection.py" = "cac_sign_app/field_detection.py"
 "editor.html" = "cac_sign_app/editor.html"
 "identity.example.json" = "cac_sign_app/identity.example.json"
 "profiles" = "cac_sign_app/profiles"

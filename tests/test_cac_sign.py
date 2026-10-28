@@ -2,7 +2,7 @@
 
 Run:  uv run --with pytest pytest -q tests
 """
-import datetime, io, json, os, sys
+import datetime, io, json, os, sys, tempfile
 
 import pikepdf
 import pytest
@@ -15,6 +15,7 @@ from reportlab.pdfgen import canvas
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import cac_sign  # noqa: E402
 import cac_signing  # noqa: E402
+import document_inputs  # noqa: E402
 from cac_signing import add_empty_sig_field, verify_signatures  # noqa: E402
 
 
@@ -1188,3 +1189,208 @@ def test_setup_leaves_someone_elses_workflow_alone(tmp_path, monkeypatch):
     (theirs / "document.wflow").write_text("my own automator thing")
     assert cac_sign_launch.setup([], refresh=False) == 1
     assert (theirs / "document.wflow").read_text() == "my own automator thing"
+
+
+def _word_input(tmp_path, signed=False):
+    from zipfile import ZipFile
+    path = tmp_path / "Permission form.docx"
+    with ZipFile(path, "w") as package:
+        package.writestr("word/document.xml", "<document/>")
+        if signed:
+            package.writestr("_xmlsignatures/sig1.xml", "<Signature/>")
+    return path
+
+
+def test_docx_conversion_is_local_private_and_never_overwrites(tmp_path, monkeypatch):
+    from pathlib import Path
+    source = _word_input(tmp_path)
+    original = source.read_bytes()
+    existing = tmp_path / "Permission form.pdf"
+    existing.write_bytes(b"keep existing PDF")
+    symlink = tmp_path / "Permission form 2.pdf"
+    symlink.symlink_to(existing)
+    def convert(argv, **kw):
+        assert kw["timeout"] == 90 and argv[1].startswith("-env:UserInstallation=file:")
+        snapshot = Path(argv[-1])
+        assert snapshot.read_bytes() == original and snapshot != source
+        assert 'DisableMacrosExecution' in (snapshot.parent / "profile/registrymodifications.xcu").read_text()
+        c = canvas.Canvas(str(snapshot.with_suffix(".pdf")))
+        c.drawString(72, 700, "Permission form")
+        c.save()
+        return type("Result", (), {"returncode": 0})()
+    monkeypatch.setattr(document_inputs.subprocess, "run", convert)
+    monkeypatch.setattr(document_inputs.os, "access", lambda *a: True)
+    monkeypatch.setattr(document_inputs.os.path, "isfile", lambda p: True)
+    out = Path(document_inputs.convert_docx(source))
+    assert out.name == "Permission form 3.pdf"
+    assert out.stat().st_mode & 0o777 == 0o600
+    assert existing.read_bytes() == b"keep existing PDF" and symlink.is_symlink()
+    assert source.read_bytes() == original
+    assert not cac_sign_editor.reader_problems(str(out))
+
+
+def test_docx_conversion_refuses_native_signatures(tmp_path, monkeypatch):
+    source = _word_input(tmp_path, signed=True)
+    monkeypatch.setattr(document_inputs.os, "access", lambda *a: True)
+    monkeypatch.setattr(document_inputs.os.path, "isfile", lambda p: True)
+    with pytest.raises(ValueError, match="cannot preserve"):
+        document_inputs.convert_docx(source)
+    assert not source.with_suffix(".pdf").exists()
+
+
+def test_docx_cli_and_both_finder_flows_open_review(tmp_path, monkeypatch):
+    source = _word_input(tmp_path)
+    seen = []
+    monkeypatch.setattr(cac_sign_editor, "main", lambda argv: seen.append(argv) or 0)
+    assert run(source) == 0
+    assert cac_sign_finder.main([str(source)]) == 0
+    assert cac_sign_launch.cli(["--review", str(source)]) == 0
+    assert seen == [["--background", str(source)], ["--background", str(source)], [str(source)]]
+    with pytest.raises(SystemExit):
+        run(source, "--verify")
+    assert not source.with_suffix(".pdf").exists()
+
+
+def test_new_text_is_reviewed_saved_and_signed(tmp_path, certs):
+    source = tmp_path / "permission.pdf"
+    c = canvas.Canvas(str(source))
+    c.drawString(72, 700, "Child name: ____________________")
+    c.save()
+    original = source.read_bytes()
+    request = {"mode": "place", "page": 0, "box": [0.1, 0.6, 0.5, 0.65],
+               "additions": [{"name": "AddedText1", "page": 0, "box": [0.25, 0.15, 0.6, 0.18]}],
+               "values": {"AddedText1": "Example Child"}, "out": str(tmp_path / "must-not-write.pdf")}
+    extra = ["--p12", certs["supervisor"], "--p12-pass", "test"]
+    filled = cac_sign_editor.fill_copy(str(source), request, extra)
+    assert filled["ok"], filled
+    assert values(filled["output"])["AddedText1"] == "Example Child"
+    assert filled["output"] == str(tmp_path / "permission_filled.pdf")
+    assert not (tmp_path / "must-not-write.pdf").exists()
+    with tempfile.TemporaryDirectory() as folder:
+        reviewed, pending = cac_sign_editor.prepare(str(source), request, folder, extra)
+        assert reviewed["ok"], reviewed
+        assert reviewed["changes"][0]["to"] == "Example Child"
+        assert values(pending["stage"])["AddedText1"] == "Example Child"
+        result = cac_sign_editor.commit(pending, extra, ack=True)
+    assert result["ok"], result
+    assert values(result["output"])["AddedText1"] == "Example Child"
+    assert all(s["ok"] for s in verify_signatures(result["output"]))
+    assert source.read_bytes() == original
+
+
+@pytest.mark.parametrize("addition", [
+    {"name": "../escape", "page": 0, "box": [0.1, 0.1, 0.5, 0.2]},
+    {"name": "AddedText1", "page": -1, "box": [0.1, 0.1, 0.5, 0.2]},
+    {"name": "AddedText1", "page": 0, "box": [0.1, 0.1, float('nan'), 0.2]},
+    {"name": "AddedText1", "page": 0, "box": [0.1, 0.1, 1.1, 0.2]},
+])
+def test_added_text_rejects_invalid_boxes_without_modifying_source(tmp_path, addition):
+    source = tmp_path / "permission.pdf"
+    c = canvas.Canvas(str(source)); c.showPage(); c.save()
+    original = source.read_bytes()
+    with pytest.raises(ValueError):
+        cac_sign_editor._add_text_fields(str(source), [addition])
+    assert source.read_bytes() == original
+
+
+def test_added_text_cannot_bypass_an_existing_signature(applicant_signed):
+    original = applicant_signed.read_bytes()
+    with pytest.raises(ValueError, match="before the document has any signatures"):
+        cac_sign_editor._add_text_fields(str(applicant_signed),
+                                        [{"name": "AddedText1", "page": 0, "box": [0.1, 0.1, 0.5, 0.2]}])
+    assert applicant_signed.read_bytes() == original
+
+
+def test_quick_action_templates_offer_pdf_and_docx():
+    import pathlib, plistlib
+    for name in cac_sign_launch.ACTIONS:
+        path = pathlib.Path(cac_sign_launch.HERE) / "quick-action" / name / "Contents"
+        info = plistlib.loads((path / "Info.plist").read_bytes())
+        assert info["NSServices"][0]["NSSendFileTypes"] == ["com.adobe.pdf", "org.openxmlformats.wordprocessingml.document"]
+        workflow = plistlib.loads((path / "document.wflow").read_bytes())
+        assert workflow["workflowMetaData"]["serviceInputTypeIdentifier"] == "com.apple.Automator.fileSystemObject"
+
+
+@pytest.fixture
+def printed_form(tmp_path):
+    """A flat form: two blanks on one line, a dashed blank, consent and a signature."""
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+    pdfmetrics.registerFont(TTFont("TestFormSymbols", "/System/Library/Fonts/Apple Symbols.ttf"))
+    path = tmp_path / "printed.pdf"
+    c = canvas.Canvas(str(path), pagesize=(612, 792))
+    c.drawString(72, 700, "Child name: ____________________")
+    c.drawString(72, 670, "Parent: __________________ Phone: ____________")
+    c.drawString(380, 640, "Classroom:")
+    c.drawString(380, 623, "----------------------")
+    c.drawString(72, 590, "Parent Signature: ___________________________")
+    c.setFont("TestFormSymbols", 12)
+    c.drawString(72, 560, "\u2610")
+    c.setFont("Helvetica", 10)
+    c.drawString(90, 560, "Share results with the school.")
+    c.save()
+    return path
+
+
+def test_detects_printed_fields_labels_checkbox_and_signature_without_changing_pdf(printed_form):
+    original = printed_form.read_bytes()
+    model = cac_sign_editor.review_model(str(printed_form))
+    assert [(f["label"], f["kind"]) for f in model["fields"]] == [
+        ("Child name", "text"), ("Parent", "text"), ("Phone", "text"),
+        ("Classroom", "text"), ("Share results with the school.", "checkbox")]
+    assert all(f["added"] and f["detected"] for f in model["fields"])
+    assert model["fields"][-1]["value"] is False  # detection never selects consent
+    signature = model["suggested_signature"]
+    assert signature["label"] == "Parent Signature" and signature["page"] == 0
+    assert not model["blocked"] and printed_form.read_bytes() == original
+
+
+@pytest.mark.parametrize("consent", [False, True])
+def test_detected_fields_can_be_reviewed_filled_and_signed(printed_form, tmp_path, certs, consent):
+    model = cac_sign_editor.review_model(str(printed_form))
+    additions = [dict(name=f["name"], kind=f["kind"], label=f["label"], **f["widgets"][0]) for f in model["fields"]]
+    entries = {f["name"]: consent if f["kind"] == "checkbox" else "Example Child"
+               for f in model["fields"] if f["kind"] == "checkbox" or f["label"] == "Child name"}
+    request = dict(model["suggested_signature"], mode="place", additions=additions, values=entries)
+    extra = ["--p12", certs["supervisor"], "--p12-pass", "test"]
+    result = cac_sign_editor.sign_direct(str(printed_form), request, extra)
+    assert result["ok"], result
+    output = result["output"]
+    assert not cac_sign_editor.reader_problems(output)
+    final = cac_sign_editor.form_model(output)
+    checkbox = next(f for f in final["fields"] if f["kind"] == "checkbox")
+    assert checkbox["value"] is consent
+    assert next(f for f in final["fields"] if f.get("label") == "Child name")["value"] == "Example Child"
+    assert all(s["ok"] for s in verify_signatures(output))
+    # Signed output retains actual AcroForm fields, and never receives a second set.
+    assert not any(f.get("detected") for f in cac_sign_editor.review_model(output)["fields"])
+
+
+def test_detection_avoids_existing_widgets_and_ambiguous_signature_selection(printed_form, tmp_path):
+    path = str(printed_form)
+    original = cac_sign_editor.review_model(path)
+    first = original["fields"][0]
+    cac_sign_editor._add_text_fields(path, [dict(name=first["name"], label=first["label"], **first["widgets"][0])])
+    model = cac_sign_editor.review_model(path)
+    assert sum(f.get("label") == "Child name" for f in model["fields"]) == 1
+    multiple = tmp_path / "multiple.pdf"
+    c = canvas.Canvas(str(multiple))
+    c.drawString(72, 700, "Parent Signature: ______________________")
+    c.drawString(72, 650, "Witness Signature: _____________________")
+    c.save()
+    assert "suggested_signature" not in cac_sign_editor.review_model(str(multiple))
+
+
+def test_detection_fails_visibly_without_weakening_the_reader_gate(printed_form, monkeypatch):
+    import field_detection
+    def broken(*args):
+        raise RuntimeError("No text reader")
+    monkeypatch.setattr(field_detection, "suggest_fields", broken)
+    model = cac_sign_editor.review_model(str(printed_form))
+    assert not model["fields"] and not model["blocked"]
+    assert any("Use Add text" in note for note in model["notes"])
+
+
+def test_pdfkit_ranges_count_utf16_units():
+    from field_detection import _range
+    assert _range("\U0001f600Name: ____", 7, 11) == (8, 4)

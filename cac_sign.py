@@ -726,10 +726,10 @@ def show_fields(path):
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description="CAC-sign existing PDFs on this Mac (fill, sign, verify).",
+    ap = argparse.ArgumentParser(prog="cac-sign", description="CAC-sign PDFs on this Mac; convert Word forms locally before review.",
                                  formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__.split("Usage:")[1])
-    ap.add_argument("files", nargs="*", help="PDF(s) to sign")
-    ap.add_argument("--list", action="store_true", help="Show fields and signatures, change nothing.")
+    ap.add_argument("files", nargs="*", help="PDF or DOCX file(s); DOCX converts locally to PDF")
+    ap.add_argument("--list", action="store_true", help="Show fields and signatures (DOCX first exports a new PDF).")
     ap.add_argument("--verify", action="store_true",
                     help="Check every signature (intact, trusted, later changes form filling only); exit 1 if any fails.")
     ap.add_argument("--set", action="append", metavar="NAME=VALUE", help="Fill a field (repeatable). Checkboxes: yes/no.")
@@ -788,6 +788,29 @@ def main(argv=None):
     missing = [p for p in args.files if not os.path.isfile(p)]
     if missing:
         ap.error("not found: " + ", ".join(missing))
+
+    if any(p.lower().endswith(".docx") for p in args.files):
+        if args.verify:
+            ap.error("--verify checks signed PDFs. DOCX signatures cannot be verified or preserved by this tool.")
+        # Word forms have printed blanks; let the owner enter text and draw a signature.
+        if not any((args.place, args.field, args.set, args.list, args.dry_run, args.no_sign,
+                    args.out, args.profile, args.reason, args.force, args.p12,
+                    args.pkcs11_lib, args.slot is not None, args.token_label, args.cert_label,
+                    args.key_label, args.cert_id, args.key_id, args.no_profile_fill,
+                    args.suffix != "_signed", args.p12_pass)):
+            import cac_sign_editor
+            return cac_sign_editor.main(["--background", *(["--opensc"] if args.opensc else []), *args.files])
+        from document_inputs import pdf_input, conversion_note
+        converted = []
+        for p in args.files:
+            try:
+                pdf = pdf_input(p)
+            except Exception as e:
+                ap.error(printable(str(e)))
+            if p.lower().endswith(".docx"):
+                say(conversion_note(p, pdf))
+            converted.append(pdf)
+        args.files = converted
 
     if args.list:
         for p in args.files:
