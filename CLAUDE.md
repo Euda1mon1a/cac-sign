@@ -48,6 +48,42 @@ digest never matched the bytes Acrobat wrote to the Mac through Citrix drive map
 
 ## cac_sign.py -- sign existing PDFs (shell command `cac-sign`)
 
+### DOCX intake and suggested fields (0.2.0)
+
+- `document_inputs.py` exports a private snapshot of an unsigned DOCX through a
+  local LibreOffice installation. Its isolated profile disables macros and active
+  embedded content. Conversion has a 90-second timeout. The resulting PDF is
+  validated and created exclusively with mode 0600 next to the Word original;
+  existing PDFs and symlinks are never replaced. Word digital-signature parts are
+  refused because conversion cannot preserve those signatures. LibreOffice is
+  optional for PDF-only use. Export can change layout; the owner reviews the PDF.
+- The plain DOCX CLI and both Finder actions open the review page. Explicit CLI
+  placement still supports conversion followed by the usual PDF signing checks.
+  `--verify` refuses DOCX rather than reporting the converted PDF as verified.
+  The shell entry point routes through `cac_sign_launch.py`, like packaged installs.
+- `field_detection.py` is a local heuristic over PDFKit's selectable text and page
+  geometry. It finds underscores, dashed blanks and empty checkbox characters,
+  derives labels from nearby text, and suggests a signature placement only when
+  exactly one signature line is detected and no native signature target is chosen.
+  It has no form-specific template, model call, OCR or vector-line recognition.
+  NSString ranges use UTF-16 units. Rotated pages are left for manual handling.
+- `review_model` adds suggestions only to the page's model. It does not change the
+  source PDF, duplicate existing widgets, infer personal values or select consent.
+  Blocked or already signed PDFs receive no suggestions. Failures are visible and
+  leave manual placement available. Multiple signature lines are not auto-selected.
+- `Add text` and detected fields use `_add_text_fields` to add text or checkbox
+  widgets only to a private unsigned snapshot. Names, labels, kinds, page indices
+  and finite page-contained rectangles are validated. Each widget has an appearance
+  stream; checkbox states are explicit `/Off` and `/Yes`. `/TU` holds readable
+  labels. The existing fill code writes values and appearances. Review, snapshot
+  hashing, signature verification and visual comparison then run as before.
+- Suggestions can be removed. **Save filled copy** works without signing. The page
+  can never supply an arbitrary output path, and the original source is unchanged.
+  Tests use synthetic forms and certificates; no real form, identity or signature
+  material belongs in the repository or release archive.
+
+### PDF signing invariants
+
 - **Incremental only.** Fills and the signature go in one appended revision through
   pyHanko's `IncrementalPdfFileWriter`, so earlier signatures stay intact. Never
   `pikepdf.save()` a signed PDF: a full rewrite breaks every existing signature.

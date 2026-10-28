@@ -1,7 +1,7 @@
 #!/bin/bash
 # cac-sign installer (macOS, Apple silicon).
 #
-#   curl -fsSL https://raw.githubusercontent.com/Euda1mon1a/cac-sign/v0.1.0/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/Euda1mon1a/cac-sign/v0.2.0/install.sh | bash
 #
 # Puts the tool in ~/.cac-sign, its Python environment in ~/.cac-sign/.venv, the two
 # Finder Quick Actions in ~/Library/Services, and the `cac-sign` command in ~/.zshrc.
@@ -10,7 +10,7 @@
 #
 # Installs the release this script names (CAC_SIGN_REF below); to update, run the
 # install line of a newer release. Uninstall:
-#   curl -fsSL https://raw.githubusercontent.com/Euda1mon1a/cac-sign/v0.1.0/install.sh | bash -s -- --uninstall
+#   curl -fsSL https://raw.githubusercontent.com/Euda1mon1a/cac-sign/v0.2.0/install.sh | bash -s -- --uninstall
 #
 # From a git clone, `./install.sh` links ~/.cac-sign to the clone instead of downloading.
 #
@@ -24,7 +24,7 @@ main() {
   set -euo pipefail
 
   REPO="Euda1mon1a/cac-sign"
-  REF="${CAC_SIGN_REF:-v0.1.0}"
+  REF="${CAC_SIGN_REF:-v0.2.0}"
   APP="$HOME/.cac-sign"
   DATA="$HOME/Library/Application Support/cac-sign"
   SERVICES="$HOME/Library/Services"
@@ -79,7 +79,7 @@ main() {
 
   say ""
   say "Done. cac-sign is installed."
-  say "  Finder: right-click a PDF > Quick Actions > CAC Sign… (review page) or CAC Sign (quick)."
+  say "  Finder: right-click a PDF or DOCX > Quick Actions > CAC Sign… (review page) or CAC Sign (quick)."
   say "  Terminal: open a new window, then: cac-sign --help"
   say "  Your data: $DATA"
   say "Signatures from other people verify as trusted only if this Mac trusts the DoD"

@@ -6,6 +6,7 @@
 # Needs uv on PATH (for its cache) and network access for the uv bootstrap and Python packages.
 # Behind a TLS-inspecting proxy, export SSL_CERT_FILE and CURL_CA_BUNDLE; they are passed through.
 set -u
+FAILURES=0
 W="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 R="${1:?usage: scripts/test-installer.sh <scratch dir that does not exist yet>}"
 mkdir "$R" || exit 1
@@ -18,7 +19,7 @@ mkdir -p "$R/pkg/cac-sign-x"
 tar -czf "$R/good.tgz" -C "$R/pkg" cac-sign-x
 
 pass() { printf 'PASS %s\n' "$*"; }
-fail() { printf 'FAIL %s\n' "$*"; }
+fail() { FAILURES=$((FAILURES + 1)); printf 'FAIL %s\n' "$*"; }
 inst() { local h="$1"; shift; env -i HOME="$h" PATH="$CLEANPATH" SHELL=/bin/zsh CAC_SIGN_NO_PROMPT=1 \
   UV_CACHE_DIR="$UV_CACHE_DIR" UV_PYTHON_INSTALL_DIR="$UV_PYTHON_INSTALL_DIR" \
   ${SSL_CERT_FILE:+"SSL_CERT_FILE=$SSL_CERT_FILE"} ${CURL_CA_BUNDLE:+"CURL_CA_BUNDLE=$CURL_CA_BUNDLE"} "$@"; }
@@ -89,3 +90,5 @@ inst "$H" CAC_SIGN_TARBALL="$R/good.tgz" bash < "$W/install.sh" > "$R/g.log" 2>&
 [ "$(grep -c '' "$H/.zshrc")" = 1 ] && pass "fresh .zshrc has just our line" || fail "fresh zshrc shape"
 inst "$H" bash -s -- --uninstall < "$W/install.sh" > "$R/g2.log" 2>&1; rc=$?
 [ $rc = 0 ] && [ ! -s "$H/.zshrc" ] && [ ! -e "$H/.cac-sign" ] && [ ! -e "$H/Library/Services/CAC Sign….workflow" ] && pass "uninstall completes, .zshrc emptied" || { fail "g rc=$rc"; cat "$R/g2.log"; }
+
+[ "$FAILURES" -eq 0 ]

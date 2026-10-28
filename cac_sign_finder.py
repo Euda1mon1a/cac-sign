@@ -111,13 +111,21 @@ def run_cli(argv):
 
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
-    pdfs = [a for a in argv if a.lower().endswith(".pdf") and os.path.isfile(a)]
+    from document_inputs import supported
+    pdfs = [a for a in argv if supported(a) and os.path.isfile(a)]
     if not pdfs:
-        pdfs = [p for p in finder_selection() if p.lower().endswith(".pdf")]
+        pdfs = [p for p in finder_selection() if supported(p) and os.path.isfile(p)]
         if not pdfs:
-            show("Select one or more PDFs in Finder first.", ok=False)
+            show("Select one or more PDF or DOCX files in Finder first.", ok=False)
             return 1
         argv += pdfs
+
+    if any(p.lower().endswith(".docx") for p in pdfs):
+        import cac_sign_editor
+        if any(a not in pdfs and a != "--opensc" for a in argv):
+            show("Use CAC Sign… to review Word documents, or use Terminal with --place.", ok=False)
+            return 1
+        return cac_sign_editor.main(["--background", *(["--opensc"] if "--opensc" in argv else []), *pdfs])
 
     rc, plan = run_cli(argv + ["--dry-run"])
     if rc != 0:  # nothing to sign: the plan says why

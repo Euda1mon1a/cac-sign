@@ -9,8 +9,8 @@
 cac-sign() {
   local dir="${CAC_SIGN_HOME:-$HOME/.cac-sign}"
   if [[ -x "$dir/.venv/bin/python" ]]; then
-    "$dir/.venv/bin/python" "$dir/cac_sign.py" "$@"
+    "$dir/.venv/bin/python" "$dir/cac_sign_launch.py" "$@"
   else
-    uv run --project "$dir" python "$dir/cac_sign.py" "$@"
+    uv run --project "$dir" python "$dir/cac_sign_launch.py" "$@"
   fi
 }

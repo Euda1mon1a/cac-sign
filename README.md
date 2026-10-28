@@ -1,8 +1,31 @@
 # cac-sign
 
-Sign PDF forms with your CAC on a Mac, without Adobe and without AVHE. Fill the
+Sign PDF and Word forms with your CAC on a Mac, without Adobe and without AVHE. Fill the
 form, sign it, and get a file whose signatures, including the ones already on it,
 are checked before the tool calls it done.
+
+Word forms work too: right-click a `.docx` and choose **Quick Actions > CAC Sign…**.
+LibreOffice converts it locally to a new PDF next to the original. The review page
+automatically suggests fields over printed underscores, dashed blanks and empty
+checkbox characters, using nearby text as labels. A single detected signature line
+is selected for signing. Check the layout and suggested positions, enter your
+details in the fields on the right, then **Sign** and review the exact filled pages
+before entering your CAC PIN. **Save filled copy** saves your entries without signing. The Word file
+is unchanged; the signed result is a PDF. Conversion can change Word layout and
+does not preserve Word digital signatures; already signed Word files are refused.
+LibreOffice must be installed for DOCX intake; PDF-only use does not need it.
+
+Detection runs locally using selectable text and its page positions. It is a
+heuristic; it does not OCR scans or detect every blank drawn with vector lines.
+Suggestions start empty, consent checkboxes start unchecked, and signed documents
+receive no new suggestions. Remove an incorrect field, or use **Add text** and
+**Draw a signature box** for anything missed. Existing PDF fields take precedence.
+
+Both Finder actions accept DOCX; **CAC Sign** opens the review page for Word
+files. In Terminal, `cac-sign "form.docx"` opens the same workflow, and
+`cac-sign --review "form.pdf"` opens a PDF for text entry and signing. With
+explicit CLI placement (`--place`), DOCX converts to PDF before the normal CLI
+signing checks. `--verify` accepts PDFs only.
 
 It exists because Acrobat inside AVHE, saving to the Mac through Citrix drive
 mapping, produces signatures whose document hash does not match the file
@@ -18,16 +41,16 @@ You need an Apple silicon Mac (M1 or later), a CAC reader, and the DoD
 certificates in your keychain (see [Requirements](#requirements)). Then, in Terminal:
 
 ```
-curl -fsSL https://raw.githubusercontent.com/Euda1mon1a/cac-sign/v0.1.0/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Euda1mon1a/cac-sign/v0.2.0/install.sh | bash
 ```
 
-That installs release v0.1.0 in `~/.cac-sign`, adds two Finder Quick Actions and a
+That installs release v0.2.0 in `~/.cac-sign`, adds two Finder Quick Actions and a
 `cac-sign` command, and asks for the name, title and duty phone you want pre-filled
 on forms (press Enter to skip). To update, run the install line of a newer release.
 To remove it:
 
 ```
-curl -fsSL https://raw.githubusercontent.com/Euda1mon1a/cac-sign/v0.1.0/install.sh | bash -s -- --uninstall
+curl -fsSL https://raw.githubusercontent.com/Euda1mon1a/cac-sign/v0.2.0/install.sh | bash -s -- --uninstall
 ```
 
 Your details and signing log stay in `~/Library/Application Support/cac-sign`
@@ -48,7 +71,7 @@ The curl installer and Homebrew install the exact package versions pinned in
 
 ## Sign a form from Finder
 
-Right-click a PDF, then **Quick Actions > CAC Sign…** (with the dots). If it isn't
+Right-click a PDF or DOCX, then **Quick Actions > CAC Sign…** (with the dots). If it isn't
 there, look under **Services**. The form opens in your browser with every field
 outlined and listed:
 
@@ -75,7 +98,7 @@ anything visible differs outside the signature box, it is kept as
 `..._signed.FAILED.pdf` and you are told not to send it. Nothing is ever
 overwritten; the output is `..._signed.pdf` next to the original.
 
-**Quick Actions > CAC Sign** (no dots) skips the review page: a dialog shows the
+For PDFs, **Quick Actions > CAC Sign** (no dots) skips the review page: a dialog shows the
 plan, **Sign** hands off to macOS for the PIN, and a last dialog shows the result.
 
 The first time, macOS may ask whether the Quick Action may use your Downloads
@@ -102,6 +125,8 @@ DONE  Doe_BLS Renewal_signed.pdf  -- signed by SMITH.JOHN.A.0987654321, all 2 si
 | Command | Does |
 |---------|------|
 | `cac-sign form.pdf --list` | Lists fields, values, signatures and page sizes. Changes nothing. |
+| `cac-sign form.docx` | Converts locally with LibreOffice, suggests fields and opens the review page. |
+| `cac-sign --review form.pdf` | Opens a PDF with existing or detected fields; enter details, review and sign. |
 | `cac-sign form.pdf --set "Date=14 OCT 2026" --set "Approve=yes"` | Fills fields, then signs the only empty signature field. |
 | `cac-sign form.pdf --field "Supervisor Signature"` | Picks a signature field when there are several. |
 | `cac-sign memo.pdf --place 1:400,60,580,95` | No signature field: adds one (page:x1,y1,x2,y2 in points from the bottom-left), then signs. |
