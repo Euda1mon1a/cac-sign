@@ -154,6 +154,24 @@ def form_model(path, profiles=None, identity=None):
                 "fields": [], "sign_target": None, "blocked": _refusal(disagree), "notes": []}
 
 
+def _autocomplete_items(identity):
+    """Saved identity values plus today's date formats for explicit click/type-ahead entry."""
+    items, seen = [], set()
+    for key, raw in (identity or {}).items():
+        if not isinstance(key, str) or not isinstance(raw, str):
+            continue
+        val = raw.strip()
+        if val and val not in seen:
+            seen.add(val)
+            items.append({"key": key.strip().lower(), "value": val})
+    for key, fmt in (("today", "%d %b %Y"), ("today_us", "%m/%d/%Y")):
+        val = time.strftime(fmt).upper() if key == "today" else time.strftime(fmt)
+        if val not in seen:
+            seen.add(val)
+            items.append({"key": key, "value": val})
+    return items
+
+
 def _form_model(path, profiles, identity, disagree):
     from pyhanko.pdf_utils.reader import PdfFileReader
     profiles = cac_sign.load_profiles() if profiles is None else profiles
@@ -257,6 +275,7 @@ def _form_model(path, profiles, identity, disagree):
             "reason": (prof or {}).get("reason"), "next_step": (prof or {}).get("next_step"),
             "fields": out, "sign_target": target, "blocked": blocked, "notes": notes, "warnings": warnings,
             "profile_fields": profile_fields if prof else None,
+            "autocomplete": _autocomplete_items(identity),
             "signed_before": [{"when": cac_sign._when(e.get("when")), "name": os.path.basename(e.get("output", "?"))}
                               for e in cac_sign.signed_before(cac_sign.file_sha256(path))[:3]]}
 

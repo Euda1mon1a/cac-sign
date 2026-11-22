@@ -1394,3 +1394,106 @@ def test_detection_fails_visibly_without_weakening_the_reader_gate(printed_form,
 def test_pdfkit_ranges_count_utf16_units():
     from field_detection import _range
     assert _range("\U0001f600Name: ____", 7, 11) == (8, 4)
+
+
+@pytest.fixture
+def vector_flat_form(tmp_path):
+    """A flat form with vector-drawn lines and checkboxes (no underscores, no AcroForm)."""
+    path = tmp_path / "vector_form.pdf"
+    c = canvas.Canvas(str(path), pagesize=(612, 792))
+    c.setFont("Helvetica-Bold", 13)
+    c.drawString(72, 740, "TRAINING AUTHORIZATION FORM")
+    c.line(72, 732, 540, 732)  # full-width header divider: must ignore
+    c.setFont("Helvetica", 11)
+    c.drawString(72, 695, "Applicant Name:")
+    c.line(162, 693, 380, 693)
+    c.drawString(72, 665, "Unit:")
+    c.drawString(115, 667, "TAMC FM")
+    c.line(108, 663, 300, 663)  # already filled: must ignore
+    c.drawString(72, 635, "Course Date:")
+    c.line(72, 616, 230, 616)  # stacked label ending with ':'
+    c.rect(72, 580, 11, 11, stroke=1, fill=0)
+    c.drawString(90, 582, "I certify this information is accurate.")
+    c.rect(72, 555, 11, 11, stroke=1, fill=0)
+    c.line(72, 555, 83, 566)  # already checked X: must ignore
+    c.line(72, 566, 83, 555)
+    c.drawString(90, 557, "Already marked option.")
+    c.line(72, 500, 290, 500)
+    c.drawString(72, 486, "Supervisor Signature")
+    c.save()
+    return path
+
+
+def test_detects_vector_lines_checkboxes_and_signature_and_can_sign(vector_flat_form, certs):
+    original = vector_flat_form.read_bytes()
+    model = cac_sign_editor.review_model(str(vector_flat_form))
+    assert [(f["label"], f["kind"]) for f in model["fields"]] == [
+        ("Applicant Name", "text"),
+        ("Course Date", "text"),
+        ("I certify this information is accurate.", "checkbox"),
+    ]
+    assert all(f["added"] and f["detected"] for f in model["fields"])
+    assert model["fields"][-1]["value"] is False
+    sig = model["suggested_signature"]
+    assert sig["label"] == "Supervisor Signature" and sig["page"] == 0
+    assert vector_flat_form.read_bytes() == original
+
+    additions = [dict(name=f["name"], kind=f["kind"], label=f["label"], **f["widgets"][0]) for f in model["fields"]]
+    entries = {model["fields"][0]["name"]: "Alex Rivera", model["fields"][2]["name"]: True}
+    request = dict(sig, mode="place", additions=additions, values=entries)
+    res = cac_sign_editor.sign_direct(str(vector_flat_form), request, ["--p12", certs["supervisor"], "--p12-pass", "test"])
+    assert res["ok"], res
+    assert not cac_sign_editor.reader_problems(res["output"])
+    assert all(s["ok"] for s in verify_signatures(res["output"]))
+    final = cac_sign_editor.form_model(res["output"])
+    assert next(f for f in final["fields"] if f.get("label") == "Applicant Name")["value"] == "Alex Rivera"
+    assert next(f for f in final["fields"] if f["kind"] == "checkbox")["value"] is True
+
+
+def test_detects_scanned_image_only_form_via_vision_and_can_sign(vector_flat_form, tmp_path, certs):
+    from reportlab.lib.utils import ImageReader
+    png = cac_sign_editor.render_page(str(vector_flat_form), 0, scale=2.0)
+    scanned = tmp_path / "scanned_form.pdf"
+    c = canvas.Canvas(str(scanned), pagesize=(612, 792))
+    c.drawImage(ImageReader(io.BytesIO(png)), 0, 0, width=612, height=792)
+    c.save()
+
+    model = cac_sign_editor.review_model(str(scanned))
+    assert [(f["label"], f["kind"]) for f in model["fields"]] == [
+        ("Applicant Name", "text"),
+        ("Course Date", "text"),
+        ("I certify this information is accurate.", "checkbox"),
+    ]
+    assert model["fields"][-1]["value"] is False
+    sig = model["suggested_signature"]
+    assert sig["label"] == "Supervisor Signature" and sig["page"] == 0
+
+    additions = [dict(name=f["name"], kind=f["kind"], label=f["label"], **f["widgets"][0]) for f in model["fields"]]
+    entries = {model["fields"][0]["name"]: "Jordan Patel", model["fields"][1]["name"]: "22 NOV 2026"}
+    request = dict(sig, mode="place", additions=additions, values=entries)
+    res = cac_sign_editor.sign_direct(str(scanned), request, ["--p12", certs["supervisor"], "--p12-pass", "test"])
+    assert res["ok"], res
+    assert not cac_sign_editor.reader_problems(res["output"])
+    assert all(s["ok"] for s in verify_signatures(res["output"]))
+    # Already-signed scan must never get a second batch of detected fields.
+    assert not any(f.get("detected") for f in cac_sign_editor.review_model(res["output"])["fields"])
+
+
+def test_review_model_includes_autocomplete_without_prefilling_detected_fields(vector_flat_form, tmp_path, monkeypatch):
+    ident = tmp_path / "identity.json"
+    ident.write_text(json.dumps({
+        "full_name": "Dr. Example User",
+        "title": "Program Director",
+        "duty_phone": "808-555-0199",
+        "npi": "1234567890",
+    }))
+    monkeypatch.setattr(cac_sign, "IDENTITY_FILE", str(ident))
+    model = cac_sign_editor.review_model(str(vector_flat_form))
+    ac = {item["key"]: item["value"] for item in model["autocomplete"]}
+    assert ac["full_name"] == "Dr. Example User"
+    assert ac["title"] == "Program Director"
+    assert ac["duty_phone"] == "808-555-0199"
+    assert ac["npi"] == "1234567890"
+    assert "today" in ac and "today_us" in ac
+    # Detected fields still start blank; autocomplete is explicit click/type-ahead only.
+    assert all(f["value"] in ("", False) for f in model["fields"] if f.get("detected"))

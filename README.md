@@ -15,8 +15,10 @@ is unchanged; the signed result is a PDF. Conversion can change Word layout and
 does not preserve Word digital signatures; already signed Word files are refused.
 LibreOffice must be installed for DOCX intake; PDF-only use does not need it.
 
-Detection runs locally using selectable text and its page positions. It is a
-heuristic; it does not OCR scans or detect every blank drawn with vector lines.
+Detection runs locally using selectable text, PDF vector fill lines and hollow checkbox
+squares, and—on scanned or image-only pages with no selectable text—macOS Vision OCR
+paired with raster blank lines and hollow checkboxes. It is a heuristic; complex
+layouts, heavy skew, or rotated pages may still need manual adjustments.
 Suggestions start empty, consent checkboxes start unchecked, and signed documents
 receive no new suggestions. Remove an incorrect field, or use **Add text** and
 **Draw a signature box** for anything missed. Existing PDF fields take precedence.
@@ -85,7 +87,13 @@ outlined and listed:
 | Grey, *Locked* | Read-only, or locked by an existing signature. |
 
 Pick the signature box on the right or click it on the page. If the form has none,
-use **Draw a signature box**. **Sign** opens **Review exactly what you'll sign**:
+use **Draw a signature box**. Editable text inputs offer type-ahead autocomplete from
+your `identity.json` (including any extra keys you add, such as `email`, `fax`, `npi`,
+or `clinic`), today’s date (`22 NOV 2026` and `11/22/2026`), and values typed earlier
+in the session. Matching fields show one-click suggestion chips, and **Fill matched · ⌘K**
+(or `f` outside a field) fills all matched blank text fields without touching already-filled
+boxes or checkboxes (`n` jumps to the next blank field; `Esc` exits a field or cancels drawing).
+**Sign** opens **Review exactly what you'll sign**:
 the file with your edits written in, drawn the way any PDF viewer shows it, and a
 list of every change. Changes that look unintended are flagged in amber (they
 replace something already there, sit in an earlier signer's part of the form, or

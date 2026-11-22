@@ -61,12 +61,19 @@ digest never matched the bytes Acrobat wrote to the Mac through Citrix drive map
   placement still supports conversion followed by the usual PDF signing checks.
   `--verify` refuses DOCX rather than reporting the converted PDF as verified.
   The shell entry point routes through `cac_sign_launch.py`, like packaged installs.
-- `field_detection.py` is a local heuristic over PDFKit's selectable text and page
-  geometry. It finds underscores, dashed blanks and empty checkbox characters,
-  derives labels from nearby text, and suggests a signature placement only when
-  exactly one signature line is detected and no native signature target is chosen.
-  It has no form-specific template, model call, OCR or vector-line recognition.
-  NSString ranges use UTF-16 units. Rotated pages are left for manual handling.
+- `field_detection.py` runs three local heuristic layers on unrotated pages without
+  adding any external package or model weight dependencies:
+  1. PDFKit selectable text for printed underscores, dashed blanks, empty checkbox
+     glyphs and ASCII `[ ]` checkboxes;
+  2. `pikepdf` vector-stream parsing (`m`/`l`/`re`/`S`/`f` with CTM tracking) for
+     drawn horizontal fill lines and hollow checkbox squares paired with PDFKit text
+     (ignoring already-filled lines, full-width dividers, and X-marked boxes);
+  3. On image-only/scanned pages (`< 20` selectable alphanumeric chars), macOS
+     `Vision.framework` (`VNRecognizeTextRequest` loaded via `pyobjc-core`) paired
+     with Pillow raster blank-line and hollow-checkbox detection.
+  It suggests a signature placement only when exactly one signature line is detected
+  and no native signature target is chosen. NSString ranges use UTF-16 units.
+  Rotated pages are left for manual handling.
 - `review_model` adds suggestions only to the page's model. It does not change the
   source PDF, duplicate existing widgets, infer personal values or select consent.
   Blocked or already signed PDFs receive no suggestions. Failures are visible and
@@ -77,7 +84,12 @@ digest never matched the bytes Acrobat wrote to the Mac through Citrix drive map
   stream; checkbox states are explicit `/Off` and `/Yes`. `/TU` holds readable
   labels. The existing fill code writes values and appearances. Review, snapshot
   hashing, signature verification and visual comparison then run as before.
-- Suggestions can be removed. **Save filled copy** works without signing. The page
+- Suggestions can be removed. **Save filled copy** works without signing. The review
+  page exposes saved `identity.json` entries (including custom keys) plus today's
+  date (`%d %b %Y` and `%m/%d/%Y`, skipping `birth`/`dob`/`expir` labels) as explicit
+  click chips, `<datalist>` type-ahead autocomplete, and a **Fill matched · ⌘K**
+  action (`⌘K`, or `f` outside a field; `n` jumps to the next blank field; `Esc`
+  blurs or cancels drawing) without silently pre-filling detected fields. The page
   can never supply an arbitrary output path, and the original source is unchanged.
   Tests use synthetic forms and certificates; no real form, identity or signature
   material belongs in the repository or release archive.
