@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+### Added
+
+- Vector-drawn horizontal fill line and hollow checkbox square detection on
+  selectable-text flat PDFs (`pikepdf` content-stream geometry paired with PDFKit
+  labels, ignoring full-width dividers, already-filled lines, and X-marked boxes).
+- Scanned and image-only PDF field detection using macOS `Vision.framework`
+  (`VNRecognizeTextRequest` loaded via existing `pyobjc-core`) paired with
+  skew-tolerant raster blank-line and hollow-checkbox detection — zero new package
+  or model weight dependencies.
+- Review-page autocomplete from `identity.json` (including custom keys) and today's
+  date (`DD MON YYYY` and `MM/DD/YYYY`, skipping DOB/birth/expiration labels):
+  `<datalist>` type-ahead, one-click suggestion chips, **Fill matched · ⌘K**
+  (`⌘K` or `f` outside a field), `n` (next blank field), and `Esc` (blur / cancel
+  drawing), without silently pre-filling detected fields or touching consent boxes.
+
 ## [0.2.0] - 2026-10-27
 
 ### Added

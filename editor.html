@@ -94,6 +94,11 @@ h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: v
 .seg button.on { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
 .mini { padding: 4px 8px; border: 1px solid var(--line); border-radius: 6px; background: transparent; cursor: pointer; font-size: 12px; }
 .mini:hover { border-color: var(--accent); }
+.acrow { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+.mini.ac { background: var(--accent-soft); border-color: transparent; color: var(--accent); font-size: 11px; padding: 2px 7px; }
+.mini.ac:hover { border-color: var(--accent); }
+.hrow { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 14px 2px 8px; }
+.hrow h2 { margin: 0; }
 .sigrow { display: flex; gap: 8px; align-items: flex-start; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; margin-bottom: 8px; }
 .sigrow.signed { background: var(--ok-soft); border-color: transparent; }
 .sigrow.problem { background: var(--bad-soft); border-color: transparent; }
@@ -145,7 +150,10 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   <aside id="side" aria-label="Fields">
     <h2>Signature</h2>
     <div id="sigPanel"></div>
-    <h2>Fields</h2>
+    <div class="hrow">
+      <h2>Fields</h2>
+      <button id="fillAllAc" class="mini ac" type="button" hidden></button>
+    </div>
     <div id="fieldList"></div>
   </aside>
 </main>
@@ -157,6 +165,7 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   <button id="fillBtn" class="secondary" type="button">Save filled copy</button>
   <button id="signBtn" class="primary" type="button">Sign</button>
 </footer>
+<datalist id="acList"></datalist>
 <div id="modal" class="modal" hidden><div id="card" class="card" role="dialog" aria-modal="true"></div></div>
 
 <script nonce="{{NONCE}}">
@@ -220,7 +229,51 @@ async function load(i) {
   const prior = (model.signed_before || []).map((p) => `You already signed this exact file on ${p.when} → ${p.name}.`);
   const msgs = [model.blocked, ...prior, ...(model.notes || [])].filter(Boolean);
   b.hidden = !msgs.length; b.className = model.blocked ? "banner" : "banner info"; b.textContent = msgs.join("  ");
+  updateAutocomplete();
   renderPages(); renderSide(); summary();
+}
+
+const AC_RULES = [
+  { re: /\bdate\b|dated/i, deny: /\b(birth|dob|expir)/i, keys: ["today", "today_us"] },
+  { re: /\bphone\b|\btel\b|telephone|contact\s*#/i, keys: ["duty_phone", "phone"] },
+  { re: /\bfax\b/i, keys: ["fax"] },
+  { re: /\be-?mail\b/i, keys: ["email"] },
+  { re: /\btitle\b|\bposition\b|\brank\b|\brole\b/i, keys: ["title", "rank"] },
+  { re: /\b(name|physician|provider|doctor|clinician|signer|supervisor|printed|oic|author)\b/i, keys: ["full_name", "name"] },
+  { re: /\b(unit|clinic|department|facility|organization|hospital)\b/i, keys: ["unit", "clinic", "facility", "department"] },
+];
+
+function updateAutocomplete() {
+  const dl = $("acList"); if (!dl) return;
+  const seen = new Set();
+  const values = [];
+  for (const item of (model && model.autocomplete) || []) {
+    if (item.value && !seen.has(item.value)) { seen.add(item.value); values.push(item.value); }
+  }
+  for (const v of Object.values(vals)) {
+    if (typeof v === "string" && v.trim() && v.trim() !== "N/A" && !seen.has(v.trim())) {
+      seen.add(v.trim()); values.push(v.trim());
+    }
+  }
+  dl.replaceChildren();
+  for (const v of values) { const op = el("option"); op.value = v; dl.appendChild(op); }
+}
+
+function fieldSuggestions(f) {
+  const items = (model && model.autocomplete) || [];
+  if (!items.length || f.kind === "checkbox" || f.kind === "radio" || f.kind === "choice") return [];
+  const lbl = (f.label || f.name || "").toLowerCase();
+  const byKey = new Map(items.map((x) => [x.key, x.value]));
+  const picked = [], seen = new Set();
+  const add = (v) => { if (v && !seen.has(v)) { seen.add(v); picked.push(v); } };
+  for (const rule of AC_RULES) if (rule.re.test(lbl) && !(rule.deny && rule.deny.test(lbl))) for (const k of rule.keys) add(byKey.get(k));
+  // Also match any custom identity.json key whose words appear in the field label.
+  for (const item of items) {
+    if (item.key === "today" || item.key === "today_us") continue;
+    const words = item.key.split(/[_\s-]+/).filter((w) => w.length >= 3);
+    if (words.length && words.every((w) => lbl.includes(w))) add(item.value);
+  }
+  return picked.slice(0, 3);
 }
 
 function renderPages() {
@@ -332,7 +385,62 @@ function renderSide() {
     list.appendChild(fieldRow(f, w, st)); shown++;
   }
   if (!shown) list.appendChild(el("div", "empty", only ? "No blank fields left." : "This PDF has no fillable fields."));
+  updateFillAllAc();
 }
+
+function matchedBlanks() {
+  const hits = [];
+  for (const f of (model && model.fields) || []) {
+    if (f.kind === "signature" || f.readonly || f.locked || !f.editable) continue;
+    if (!blank(f, vals[f.name])) continue;
+    const hints = fieldSuggestions(f);
+    if (hints.length) hits.push({ f, val: hints[0] });
+  }
+  return hits;
+}
+
+function fillAllMatched() {
+  const hits = matchedBlanks();
+  if (!hits.length) return;
+  for (const { f, val } of hits) vals[f.name] = val;
+  updateAutocomplete();
+  refresh();
+}
+
+function updateFillAllAc() {
+  const btn = $("fillAllAc"); if (!btn) return;
+  const hits = matchedBlanks();
+  btn.hidden = !hits.length;
+  if (hits.length) {
+    btn.textContent = `Fill matched (${hits.length}) · ⌘K`;
+    btn.title = "Fill blank text fields that match your saved identity or today's date (⌘K, or f outside a field; leaves checkboxes untouched)";
+  }
+}
+
+$("fillAllAc").addEventListener("click", fillAllMatched);
+
+document.addEventListener("keydown", (e) => {
+  if (!$("modal").hidden) return;
+  const tag = (document.activeElement && document.activeElement.tagName) || "";
+  const typing = ["INPUT", "TEXTAREA", "SELECT"].includes(tag);
+  if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "k") {
+    e.preventDefault();
+    fillAllMatched();
+    return;
+  }
+  if (e.key === "Escape") {
+    if (drawing) { drawing = false; document.querySelectorAll(".page").forEach((p) => p.classList.remove("drawing")); summary(); }
+    else if (typing) document.activeElement.blur();
+    return;
+  }
+  if (typing || e.metaKey || e.ctrlKey || e.altKey) return;
+  if (e.key.toLowerCase() === "f") { e.preventDefault(); fillAllMatched(); }
+  else if (e.key.toLowerCase() === "n") {
+    e.preventDefault();
+    const firstBlank = (model && model.fields || []).find((f) => f.kind !== "signature" && !f.readonly && !f.locked && f.editable && blank(f, vals[f.name]));
+    if (firstBlank) focusField(firstBlank.name);
+  }
+});
 
 function fieldRow(f, w, st) {
   const row = el("div", "field"); row.dataset.name = f.name;
@@ -361,17 +469,27 @@ function fieldRow(f, w, st) {
     s.value = vals[f.name]; s.addEventListener("change", () => set(s.value)); ctl.appendChild(s);
   } else {
     const inp = f.multiline ? el("textarea") : el("input");
-    if (!f.multiline) inp.type = "text";
+    if (!f.multiline) { inp.type = "text"; if (!off) inp.setAttribute("list", "acList"); }
     inp.value = vals[f.name] || ""; inp.disabled = off; inp.setAttribute("aria-label", f.label || f.name);
     if (f.maxlen) inp.maxLength = f.maxlen;
     inp.addEventListener("input", () => set(inp.value));
     inp.addEventListener("focus", () => mark(f.name, true));
-    inp.addEventListener("blur", () => mark(f.name, false));
+    inp.addEventListener("blur", () => { mark(f.name, false); updateAutocomplete(); });
     if (!f.multiline) inp.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); nextInput(inp); } });
     ctl.appendChild(inp);
     if (!off) {
       const na = el("button", "mini", "N/A"); na.type = "button"; na.title = "Fill with N/A";
       na.addEventListener("click", () => { inp.value = "N/A"; set("N/A"); }); ctl.appendChild(na);
+    }
+    const hints = off ? [] : fieldSuggestions(f);
+    if (hints.length) {
+      const ac = el("div", "acrow");
+      for (const h of hints) {
+        const b = el("button", "mini ac", h); b.type = "button"; b.title = `Fill with ${h}`;
+        b.addEventListener("click", () => { inp.value = h; set(h); updateAutocomplete(); });
+        ac.appendChild(b);
+      }
+      row._ac = ac;
     }
   }
   if (!off && !same(vals[f.name], orig[f.name])) {
@@ -379,6 +497,7 @@ function fieldRow(f, w, st) {
     u.addEventListener("click", () => { vals[f.name] = orig[f.name]; refresh(); }); ctl.appendChild(u);
   }
   row.appendChild(ctl);
+  if (row._ac) row.appendChild(row._ac);
   if (f.added) {
     const remove = el("button", "mini", "Remove field"); remove.type = "button";
     remove.addEventListener("click", () => {
@@ -411,7 +530,7 @@ function refreshField(f) {
     if (changed && !undo) { const u = el("button", "mini", "Undo"); u.type = "button"; u.addEventListener("click", () => { vals[f.name] = orig[f.name]; refresh(); }); ctl.appendChild(u); }
     if (!changed && undo) undo.remove();
   }
-  fitText(); summary();
+  fitText(); summary(); updateFillAllAc();
 }
 
 function refresh() { renderPages(); renderSide(); summary(); }
