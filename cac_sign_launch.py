@@ -15,6 +15,7 @@ import json, os, plistlib, shlex, shutil, subprocess, sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SERVICES = "~/Library/Services"
+DESKTOP_APP = "/Applications/CACSign.app"
 # Each Quick Action this sets up names the script it runs, in a comment, so the curl
 # installer and `--setup --remove` recognise it as ours (install.sh: is_our_workflow).
 ACTIONS = {"CAC Sign.workflow": ("--quick-action", "cac_sign_finder.py"),
@@ -26,9 +27,23 @@ def _modules():
         sys.path.insert(0, HERE)  # the tool's modules import each other by their plain names
 
 
+def _desktop_app_path():
+    if os.environ.get("CAC_SIGN_FORCE_WEB") == "1":
+        return None
+    app = os.environ.get("CAC_SIGN_APP") or DESKTOP_APP
+    if ("PYTEST_CURRENT_TEST" in os.environ
+            and app == "/Applications/CACSign.app"
+            and not os.environ.get("CAC_SIGN_APP")):
+        return None
+    return app if os.path.isdir(app) else None
+
+
 def cli(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     _modules()
+    if argv[:1] == ["--desktop-worker"]:
+        import cac_sign_desktop
+        return cac_sign_desktop.main(argv[1:])
     if argv[:1] == ["--setup"]:
         return setup(argv[1:])
     if argv[:1] == ["--quick-action"]:
@@ -40,8 +55,13 @@ def cli(argv=None):
             cac_sign_finder.notify(printable(f"{type(e).__name__}: {e}"))
             return 1
     if argv[:1] == ["--review"]:
+        rest = argv[1:]
+        files = [os.path.abspath(a) for a in rest if not a.startswith("-")]
+        app = _desktop_app_path()
+        if app and files and "--no-browser" not in rest and "-h" not in rest and "--help" not in rest:
+            return subprocess.run(["open", "-a", app, *files]).returncode
         import cac_sign_editor
-        return cac_sign_editor.main(argv[1:])
+        return cac_sign_editor.main(rest)
     import cac_sign
     return cac_sign.main(argv)
 
