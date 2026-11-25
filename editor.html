@@ -152,7 +152,11 @@ button:disabled { opacity: .45; cursor: not-allowed; }
     <div id="sigPanel"></div>
     <div class="hrow">
       <h2>Fields</h2>
-      <button id="fillAllAc" class="mini ac" type="button" hidden></button>
+      <div class="acrow" style="margin-top:0">
+        <button id="pastePt" class="mini" type="button" title="Paste patient demographics block (or press ⌘V outside a field)">Paste patient</button>
+        <button id="clearPt" class="mini" type="button" hidden title="Clear pasted patient info and undo auto-filled patient fields">Clear patient</button>
+        <button id="fillAllAc" class="mini ac" type="button" hidden></button>
+      </div>
     </div>
     <div id="fieldList"></div>
   </aside>
@@ -177,6 +181,7 @@ history.replaceState(null, "", "/");
 const $ = (id) => document.getElementById(id);
 const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
 let files = [], cur = 0, model = null, vals = {}, orig = {}, prop = {}, target = null, place = null, drawing = false;
+let patient = null, patientApplied = {};
 const urls = [];
 
 async function api(path, body) {
@@ -209,7 +214,7 @@ async function loadFiles() {
 }
 
 async function load(i) {
-  cur = i; $("fileSel").value = i; place = null; drawing = false;
+  cur = i; $("fileSel").value = i; place = null; drawing = false; patient = null; patientApplied = {};
   urls.splice(0).forEach((u) => URL.revokeObjectURL(u));
   $("pages").replaceChildren(el("div", "empty", "Loading…"));
   try { model = await (await api(`/api/form?f=${i}`)).json(); }
@@ -233,43 +238,243 @@ async function load(i) {
   renderPages(); renderSide(); summary();
 }
 
+const AC_GOVERNED_KEYS = new Set(["today", "today_us", "today_iso_compact", "duty_phone", "phone", "fax", "npi", "dea",
+  "license", "email", "title", "rank", "full_name", "name", "unit", "clinic", "facility", "department"]);
+const THIRD_PARTY_DENY = /^(?:sponsor|admin|parent\/guardian)\s+—|\b(sponsor|soldier|service\s*member|active\s+duty\s+spouse|spouse\s+ssn|spouse'?s\s+name|case\s+manager|administrative\s+certification|for\s+administrative\s+use|military\s+personnel\s+division|screening\s+coordinator|parent\/guardian)\b/i;
 const AC_RULES = [
-  { re: /\bdate\b|dated/i, deny: /\b(birth|dob|expir)/i, keys: ["today", "today_us"] },
-  { re: /\bphone\b|\btel\b|telephone|contact\s*#/i, keys: ["duty_phone", "phone"] },
+  { re: /\bdate\b|dated/i,
+    deny: /\b(birth|dob|expir|well-child|treatment\s+completed|last\s+used|last\s+admission|hospitalization|sent\s+for\s+coding|edas|rfo|diagnosed)\b/i,
+    keys: ["today", "today_us"], compactKeys: ["today_iso_compact", "today", "today_us"] },
+  { re: /\bnpi\b/i, keys: ["npi"] },
+  { re: /\bdea\b/i, keys: ["dea"] },
+  { re: /\b(?:state\s+)?licen[sc]e\b/i, deny: /\b(driver|plate|vehicle)\b/i, keys: ["license"] },
+  { re: /\bphone\b|\btel\b|telephone|contact\s*#|^provider\s+—.*\bcommercial\b/i,
+    deny: /\b(patient|family\s+home|home|cell|mobile|daytime|member|subscriber|emergency|insurance)\b|\(\d+\)\s*dsn\b|^\s*dsn\b/i,
+    keys: ["duty_phone", "phone"] },
   { re: /\bfax\b/i, keys: ["fax"] },
-  { re: /\be-?mail\b/i, keys: ["email"] },
+  { re: /\be-?mail\b/i, deny: /\b(patient|family\s+home|member|subscriber)\b/i, keys: ["email"] },
   { re: /\btitle\b|\bposition\b|\brank\b|\brole\b/i, keys: ["title", "rank"] },
-  { re: /\b(name|physician|provider|doctor|clinician|signer|supervisor|printed|oic|author)\b/i, keys: ["full_name", "name"] },
-  { re: /\b(unit|clinic|department|facility|organization|hospital)\b/i, keys: ["unit", "clinic", "facility", "department"] },
+  { re: /\b(name|physician|provider|practitioner|doctor|clinician|signer|supervisor|printed|oic|author)\b/i,
+    deny: /^provider\s+—(?!.*\bname\b)|\b(first|last|middle|family\s+member|patient|member|subscriber|beneficiary|child|student|insurance|carrier|plan|emergency|spouse|parent|mother|father|file|course|medication|address|phone|tel|telephone|fax|e-?mail|dsn|commercial|date|title|rank|npi|dea|license)\b/i,
+    keys: ["full_name", "name"] },
+  { re: /\b(unit|clinic|department|facility|organization|hospital)\b|^provider\s+—.*\b(?:mailing\s+)?address\b|\bm_addres\b/i,
+    keys: ["clinic", "unit", "facility", "department"] },
 ];
+
+const KNOWN_PT_KEYS = new Set([
+  "full name", "patient name", "name", "first name", "middle name", "last name", "age",
+  "date of birth", "dob", "birth date", "birthdate", "sex", "gender", "race", "ethnicity",
+  "marital status", "language", "mrn", "medical record number", "fin", "ssn", "social security number",
+  "dod id", "edipi", "sponsor ssn", "religion", "home address", "mailing address", "street address",
+  "address", "city", "state", "zip", "zip code", "county", "home phone", "cell phone", "mobile phone",
+  "daytime phone", "work phone", "bus phone", "business phone", "phone", "telephone", "email", "e-mail",
+  "insurance", "primary insurance", "primary insurance name", "insurance name", "insurance number",
+  "insurance id", "member id", "subscriber id", "policy number", "benefits number",
+]);
+const PROVIDER_LABEL_RE = /\b(physician|provider|doctor|clinician|prescriber|signer|supervisor|attending|referring|author|oic|commander|witness|npi|dea|license|clinic|facility|department|unit|hospital)\b/i;
+
+function fmtPhone(raw) {
+  if (!raw) return "";
+  let d = String(raw).replace(/\D+/g, "");
+  if (d.length === 11 && d.startsWith("1")) d = d.slice(1);
+  return d.length === 10 ? `${d.slice(0, 3)}-${d.slice(3, 6)}-${d.slice(6)}` : String(raw).trim();
+}
+
+function parsePatientClipboard(raw) {
+  if (!raw || typeof raw !== "string") return null;
+  const map = new Map();
+  let curKey = null;
+  for (const rawLine of raw.replace(/\r\n?/g, "\n").split("\n")) {
+    const line = rawLine.trim();
+    if (/^(general\s+information|patient\s+information|demographics)$/i.test(line)) { curKey = null; continue; }
+    const m = /^([A-Za-z][A-Za-z0-9 /#()-]{1,34}):(?:\s*(.*))?$/.exec(line);
+    if (m) {
+      const normKey = m[1].trim().toLowerCase().replace(/\s+/g, " ");
+      const inline = (m[2] || "").trim();
+      if (!inline || KNOWN_PT_KEYS.has(normKey)) {
+        curKey = normKey;
+        if (!map.has(curKey)) map.set(curKey, []);
+        if (inline) map.get(curKey).push(inline);
+        continue;
+      }
+    }
+    if (curKey && line) map.get(curKey).push(line);
+  }
+  const first = (...keys) => {
+    for (const k of keys) { const arr = map.get(k); if (arr && arr.length) return arr[0].trim(); }
+    return "";
+  };
+  const out = {};
+  const rawName = first("full name", "patient name", "name");
+  if (rawName) {
+    if (rawName.includes(",")) {
+      const idx = rawName.indexOf(",");
+      out.last_name = rawName.slice(0, idx).trim();
+      const given = rawName.slice(idx + 1).trim().replace(/\s+/g, " ");
+      if (given) {
+        const parts = given.split(" ");
+        out.first_name = given;
+        out.first_only = parts[0];
+        if (parts.length > 1) out.middle_name = parts.slice(1).join(" ");
+        out.full_name = `${given} ${out.last_name}`.trim();
+        out.full_name_comma = `${out.last_name}, ${given}`.trim();
+      }
+    } else {
+      const parts = rawName.replace(/\s+/g, " ").split(" ");
+      out.full_name = parts.join(" ");
+      if (parts.length >= 2) {
+        out.last_name = parts[parts.length - 1];
+        out.first_name = parts.slice(0, -1).join(" ");
+        out.first_only = parts[0];
+        if (parts.length > 2) out.middle_name = parts.slice(1, -1).join(" ");
+      } else out.first_name = parts[0];
+    }
+  }
+  if (first("first name")) { out.first_name = first("first name"); out.first_only = out.first_name.split(/\s+/)[0]; }
+  if (first("last name")) out.last_name = first("last name");
+  if (first("middle name")) out.middle_name = first("middle name");
+  if (!out.full_name && (out.first_name || out.last_name)) out.full_name = [out.first_name, out.last_name].filter(Boolean).join(" ");
+
+  const rawDob = first("date of birth", "dob", "birth date", "birthdate");
+  if (rawDob) {
+    const dm = /^(\d{1,2})\/(\d{1,2})\/(\d{4})\b/.exec(rawDob);
+    const iso = /^(\d{4})-(\d{2})-(\d{2})\b/.exec(rawDob);
+    const ymd = /^(\d{8})\b/.exec(rawDob);
+    if (dm) {
+      const mm = dm[1].padStart(2, "0"), dd = dm[2].padStart(2, "0"), yyyy = dm[3];
+      out.dob = `${mm}/${dd}/${yyyy}`;
+      out.dob_yyyymmdd = `${yyyy}${mm}${dd}`;
+    } else if (iso) {
+      out.dob = `${iso[2]}/${iso[3]}/${iso[1]}`;
+      out.dob_yyyymmdd = `${iso[1]}${iso[2]}${iso[3]}`;
+    } else if (ymd) {
+      out.dob_yyyymmdd = ymd[1];
+      out.dob = `${ymd[1].slice(4, 6)}/${ymd[1].slice(6, 8)}/${ymd[1].slice(0, 4)}`;
+    } else out.dob = rawDob.split(/\s+/)[0];
+  }
+  const rawAge = first("age");
+  if (rawAge) { out.age_raw = rawAge; const am = /^\d+/.exec(rawAge); if (am) out.age = am[0]; }
+  const sex = first("sex", "gender");
+  if (sex) out.sex = sex;
+
+  const addrLines = map.get("home address") || map.get("mailing address") || map.get("address") || [];
+  if (addrLines.length) {
+    const last = addrLines[addrLines.length - 1];
+    const csz = /^(.+?)[,\s]+([A-Za-z]{2})\s+(\d{5})(?:-?(\d{4}))?$/.exec(last);
+    if (csz && addrLines.length >= 2) {
+      out.city = csz[1].trim().replace(/,+$/, "");
+      out.state = csz[2].toUpperCase();
+      out.zip = csz[4] ? `${csz[3]}-${csz[4]}` : csz[3];
+      out.city_state_zip = `${out.city}, ${out.state} ${out.zip}`;
+      out.street = addrLines.slice(0, -1).join(", ");
+    } else out.street = addrLines.join(", ");
+    out.full_address = [out.street, out.city_state_zip].filter(Boolean).join(", ");
+  }
+  if (first("street address")) out.street = first("street address");
+  if (first("city")) out.city = first("city");
+  if (first("state")) out.state = first("state");
+  if (first("zip", "zip code")) out.zip = first("zip", "zip code");
+  if (!out.city_state_zip && (out.city || out.state || out.zip)) {
+    out.city_state_zip = `${[out.city, out.state].filter(Boolean).join(", ")}${out.zip ? ` ${out.zip}` : ""}`.trim();
+  }
+  if (!out.full_address && (out.street || out.city_state_zip)) {
+    out.full_address = [out.street, out.city_state_zip].filter(Boolean).join(", ");
+  }
+
+  const ph = first("home phone", "cell phone", "mobile phone", "daytime phone", "phone", "telephone", "bus phone", "work phone", "business phone");
+  if (ph) out.patient_phone = fmtPhone(ph);
+  const insId = first("insurance number", "insurance id", "member id", "subscriber id", "policy number", "benefits number");
+  if (insId) out.insurance_id = insId;
+  const insName = first("primary insurance name", "primary insurance", "insurance name", "insurance");
+  if (insName) out.insurance_name = insName;
+  const mrn = first("mrn", "medical record number");
+  if (mrn) out.mrn = mrn;
+  const email = first("email", "e-mail");
+  if (email) out.patient_email = email;
+
+  return Object.keys(out).length ? out : null;
+}
+
+function fieldLabelText(f) {
+  return [f && f.label, f && f.name].filter((s) => s && !/^AddedText\d+$/.test(s)).join(" ").trim();
+}
+
+function formHasSeparateCityStateZip() {
+  return ((model && model.fields) || []).some((f) =>
+    /\b(city\b.*\bstate|city\s*\/\s*state|^\s*city\s*$|^\s*zip(?:\s*code)?\s*$)\b/i.test(f.label || f.name || ""));
+}
+
+function patientSuggestions(f) {
+  if (!patient || f.kind === "checkbox" || f.kind === "radio" || f.kind === "choice") return [];
+  const lbl = fieldLabelText(f);
+  if (!lbl || /^provider\s+—/i.test(lbl) || PROVIDER_LABEL_RE.test(lbl) || THIRD_PARTY_DENY.test(lbl)) return [];
+  const compactDate = /\byyyymmdd\b|y\s+y\s+y\s+y\s+m\s+m\s+d\s+d/i.test(lbl);
+  const commaName = /\blast\s*,\s*first\b/i.test(lbl);
+  const out = [], seen = new Set();
+  const add = (v) => { if (v && !seen.has(v)) { seen.add(v); out.push(v); } };
+  if (/\b(?:family\s+member\/patient|family\s+member|patient|member|subscriber|veteran|beneficiary|recipient|child|student)(?:'s)?\s*(?:full\s*)?name\b|\bname\s+of\s+(?:patient|family\s+member)\b|^patient\s+—.*\bname\b|\bfamily\s+members\b.*\bname\b|\bfamily\s+member\s+screening\b.*\bname\b|^\s*full\s*name\s*$/i.test(lbl)) {
+    if (commaName) { add(patient.full_name_comma); add(patient.full_name); }
+    else { add(patient.full_name); add(patient.full_name_comma); }
+  } else if (/\bfirst\s*name\b|\bgiven\s*name\b/i.test(lbl)) { add(patient.first_name); add(patient.first_only); }
+  else if (/\blast\s*name\b|\bsurname\b|\bfamily\s*name\b/i.test(lbl)) add(patient.last_name);
+  else if (/\bmiddle\s*(?:name|initial)\b|^\s*mi\s*$/i.test(lbl)) add(patient.middle_name);
+  else if (/\b(date\s+of\s+birth|birth\s*date|birthdate|dob)\b/i.test(lbl) && !/\b(age\s+when|well-child|admission)\b/i.test(lbl)) {
+    if (compactDate) { add(patient.dob_yyyymmdd); add(patient.dob); }
+    else { add(patient.dob); add(patient.dob_yyyymmdd); }
+  } else if (/\bcity\b.*\bstate\b.*\bzip\b|\bcity\s*\/\s*state/i.test(lbl) && !/\b(mailing\s+address|street)\b/i.test(lbl)) {
+    add(patient.city_state_zip);
+  } else if (/\bstreet\b|\baddress\s*(?:line\s*)?1\b/i.test(lbl) && !/\bcity,\s*state,\s*zip\b/i.test(lbl)) {
+    add(patient.street); add(patient.full_address);
+  } else if (/\b(?:family\s+member\s+mailing|home|mailing|patient|current|residential)?\s*address\b|\bfamily_a\b/i.test(lbl) && !/\b(e-?mail|line\s*2|billing)\b/i.test(lbl)) {
+    if (!/\bcity,\s*state,\s*zip\b/i.test(lbl) && formHasSeparateCityStateZip()) { add(patient.street); add(patient.full_address); }
+    else { add(patient.full_address); add(patient.street); }
+  } else if (/^\s*city\s*$/i.test(lbl)) add(patient.city);
+  else if (/^\s*state\s*$/i.test(lbl)) add(patient.state);
+  else if (/\bzip(?:\s*code)?\b|\bpostal\s*code\b/i.test(lbl) && !/\b(city|include\s+zip)\b/i.test(lbl)) add(patient.zip);
+  else if (/\b(?:patient|family\s+home|home|cell|mobile|daytime|member|subscriber)(?:'s)?\s*(?:phone|tel|telephone|number|contact|#)\b/i.test(lbl)) add(patient.patient_phone);
+  else if (/\b(?:patient|family\s+home|member|subscriber)(?:'s)?\s*e-?mail\b/i.test(lbl)) add(patient.patient_email);
+  else if (/\b(?:insurance\s*(?:id|number|no\.?|#)|member\s*(?:id|number|no\.?|#)|subscriber\s*(?:id|number|no\.?|#)|policy\s*(?:id|number|no\.?|#)|benefits?\s*(?:id|number|no\.?|#)|dbn)\b/i.test(lbl)) add(patient.insurance_id);
+  else if (/\b(?:primary\s+)?insurance(?:\s+name|\s+carrier|\s+plan)?\b/i.test(lbl) && !/\b(id|number|no\.?|#|phone|address)\b/i.test(lbl)) add(patient.insurance_name);
+  else if (/\b(mrn|medical\s+record(?:\s+number|\s*#)?)\b/i.test(lbl)) add(patient.mrn);
+  else if (/\b(sex|gender)\b/i.test(lbl)) add(patient.sex);
+  else if (/^\s*age\s*$/i.test(lbl)) { add(patient.age); add(patient.age_raw); }
+  return out.slice(0, 3);
+}
 
 function updateAutocomplete() {
   const dl = $("acList"); if (!dl) return;
   const seen = new Set();
   const values = [];
-  for (const item of (model && model.autocomplete) || []) {
-    if (item.value && !seen.has(item.value)) { seen.add(item.value); values.push(item.value); }
-  }
-  for (const v of Object.values(vals)) {
-    if (typeof v === "string" && v.trim() && v.trim() !== "N/A" && !seen.has(v.trim())) {
-      seen.add(v.trim()); values.push(v.trim());
-    }
-  }
+  const push = (v) => { if (typeof v === "string" && v.trim() && v.trim() !== "N/A" && !seen.has(v.trim())) { seen.add(v.trim()); values.push(v.trim()); } };
+  if (patient) for (const v of Object.values(patient)) push(v);
+  for (const item of (model && model.autocomplete) || []) push(item.value);
+  for (const v of Object.values(vals)) push(v);
   dl.replaceChildren();
   for (const v of values) { const op = el("option"); op.value = v; dl.appendChild(op); }
 }
 
 function fieldSuggestions(f) {
+  if (f.kind === "checkbox" || f.kind === "radio" || f.kind === "choice") return [];
+  const ptHits = patientSuggestions(f);
+  if (ptHits.length) return ptHits;
   const items = (model && model.autocomplete) || [];
-  if (!items.length || f.kind === "checkbox" || f.kind === "radio" || f.kind === "choice") return [];
-  const lbl = (f.label || f.name || "").toLowerCase();
+  if (!items.length) return [];
+  const rawLbl = fieldLabelText(f);
+  if (!rawLbl || THIRD_PARTY_DENY.test(rawLbl)) return [];
+  const lbl = rawLbl.toLowerCase();
+  const compactDate = /\byyyymmdd\b|y\s+y\s+y\s+y\s+m\s+m\s+d\s+d/i.test(rawLbl);
   const byKey = new Map(items.map((x) => [x.key, x.value]));
   const picked = [], seen = new Set();
   const add = (v) => { if (v && !seen.has(v)) { seen.add(v); picked.push(v); } };
-  for (const rule of AC_RULES) if (rule.re.test(lbl) && !(rule.deny && rule.deny.test(lbl))) for (const k of rule.keys) add(byKey.get(k));
-  // Also match any custom identity.json key whose words appear in the field label.
+  for (const rule of AC_RULES) {
+    if (rule.re.test(lbl) && !(rule.deny && rule.deny.test(lbl))) {
+      const keys = (compactDate && rule.compactKeys) ? rule.compactKeys : rule.keys;
+      for (const k of keys) add(byKey.get(k));
+    }
+  }
+  // Also match any custom identity.json key (e.g. specialty) whose words appear in the field label.
   for (const item of items) {
-    if (item.key === "today" || item.key === "today_us") continue;
+    if (AC_GOVERNED_KEYS.has(item.key)) continue;
     const words = item.key.split(/[_\s-]+/).filter((w) => w.length >= 3);
     if (words.length && words.every((w) => lbl.includes(w))) add(item.value);
   }
@@ -407,17 +612,115 @@ function fillAllMatched() {
   refresh();
 }
 
+function updatePatientControls() {
+  const pBtn = $("pastePt"), cBtn = $("clearPt");
+  if (!pBtn || !cBtn) return;
+  const disabled = !!(model && model.blocked);
+  pBtn.disabled = disabled;
+  cBtn.hidden = !patient;
+  pBtn.textContent = patient ? `Patient: ${patient.last_name || patient.full_name || "loaded"}` : "Paste patient";
+}
+
+function applyPatientPaste(raw) {
+  const parsed = parsePatientClipboard(raw);
+  if (!parsed) return { ok: false };
+  // If re-pasting over an earlier paste on the same page, revert untouched prior auto-fills first.
+  for (const [k, prev] of Object.entries(patientApplied)) {
+    if (same(vals[k], prev)) vals[k] = orig[k];
+  }
+  patient = parsed;
+  patientApplied = {};
+  let filled = 0;
+  for (const f of (model && model.fields) || []) {
+    if (f.kind === "signature" || f.readonly || f.locked || !f.editable) continue;
+    if (!blank(f, vals[f.name])) continue;
+    const hints = patientSuggestions(f);
+    if (hints.length) {
+      vals[f.name] = hints[0];
+      patientApplied[f.name] = hints[0];
+      filled++;
+    }
+  }
+  updateAutocomplete();
+  updatePatientControls();
+  refresh();
+  return { ok: true, filled };
+}
+
+function clearPatient() {
+  for (const [k, prev] of Object.entries(patientApplied)) {
+    if (same(vals[k], prev)) vals[k] = orig[k];
+  }
+  patient = null;
+  patientApplied = {};
+  updateAutocomplete();
+  updatePatientControls();
+  refresh();
+}
+
+function openPatientPasteModal(errMsg) {
+  modal((c) => {
+    c.append(el("h3", null, "Paste patient information"),
+             el("p", "muted", "Paste a copied patient demographics or GENERAL INFORMATION block. Stays in browser memory only; fills blank matching patient fields and leaves checkboxes untouched."));
+    const ta = el("textarea");
+    ta.rows = 10;
+    ta.style.width = "100%";
+    ta.style.padding = "8px";
+    ta.style.borderRadius = "8px";
+    ta.style.border = "1px solid var(--line)";
+    ta.style.background = "var(--bg)";
+    ta.placeholder = "GENERAL INFORMATION\nFull Name:\nLast, First Middle\nDate of Birth:\nMM/DD/YYYY ...";
+    const err = el("p", "prior", errMsg || "");
+    err.hidden = !errMsg;
+    const submit = () => {
+      const r = applyPatientPaste(ta.value);
+      if (!r.ok) {
+        err.textContent = "No recognized patient fields (e.g. Full Name:, Date of Birth:, Home Address:) found in pasted text.";
+        err.hidden = false;
+        return;
+      }
+      closeModal();
+    };
+    ta.addEventListener("keydown", (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); submit(); }
+    });
+    c.append(ta, err);
+    actions(c, btn("Cancel", "ghost", closeModal), btn("Apply to blank patient fields", "primary", submit));
+    setTimeout(() => ta.focus(), 20);
+  });
+}
+
 function updateFillAllAc() {
+  updatePatientControls();
   const btn = $("fillAllAc"); if (!btn) return;
   const hits = matchedBlanks();
   btn.hidden = !hits.length;
   if (hits.length) {
     btn.textContent = `Fill matched (${hits.length}) · ⌘K`;
-    btn.title = "Fill blank text fields that match your saved identity or today's date (⌘K, or f outside a field; leaves checkboxes untouched)";
+    btn.title = "Fill blank text fields that match your saved identity, pasted patient info, or today's date (⌘K, or f outside a field; leaves checkboxes untouched)";
   }
 }
 
 $("fillAllAc").addEventListener("click", fillAllMatched);
+$("clearPt").addEventListener("click", clearPatient);
+$("pastePt").addEventListener("click", async () => {
+  if (model && model.blocked) return;
+  if (navigator.clipboard && navigator.clipboard.readText) {
+    try {
+      const txt = await navigator.clipboard.readText();
+      if (txt && applyPatientPaste(txt).ok) return;
+    } catch (e) {}
+  }
+  openPatientPasteModal();
+});
+
+document.addEventListener("paste", (e) => {
+  if (!$("modal").hidden || (model && model.blocked)) return;
+  const tag = (document.activeElement && document.activeElement.tagName) || "";
+  if (["INPUT", "TEXTAREA", "SELECT"].includes(tag)) return;
+  const txt = e.clipboardData && e.clipboardData.getData("text/plain");
+  if (txt && applyPatientPaste(txt).ok) e.preventDefault();
+});
 
 document.addEventListener("keydown", (e) => {
   if (!$("modal").hidden) return;
@@ -474,7 +777,7 @@ function fieldRow(f, w, st) {
     if (f.maxlen) inp.maxLength = f.maxlen;
     inp.addEventListener("input", () => set(inp.value));
     inp.addEventListener("focus", () => mark(f.name, true));
-    inp.addEventListener("blur", () => { mark(f.name, false); updateAutocomplete(); });
+    inp.addEventListener("blur", () => { mark(f.name, false); updateAutocomplete(); void autosaveSignerFields([f]); });
     if (!f.multiline) inp.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); nextInput(inp); } });
     ctl.appendChild(inp);
     if (!off) {
@@ -610,7 +913,55 @@ function closeModal() { $("modal").hidden = true; }
 function actions(c, ...btns) { const a = el("div", "actions"); a.append(...btns); c.appendChild(a); }
 function btn(text, cls, fn) { const b = el("button", cls, text); b.type = "button"; b.addEventListener("click", fn); return b; }
 
+const NON_SIGNER_AUTOSAVE_RE = /\b(patient|member|subscriber|sponsor|beneficiary|child|student|emergency|spouse|parent|mother|father|insurance|carrier|plan|pharmacy|vendor|recipient)\b/i;
+
+function signerAutosaveKey(f) {
+  if (!f || f.kind !== "text" || f.multiline || f.readonly || f.locked || !f.editable) return null;
+  if (f.name in patientApplied || patientSuggestions(f).length > 0) return null;
+  const lbl = fieldLabelText(f);
+  if (!lbl || NON_SIGNER_AUTOSAVE_RE.test(lbl) || THIRD_PARTY_DENY.test(lbl)) return null;
+  if (/\bnpi\b/i.test(lbl)) return "npi";
+  if (/\bfax\b/i.test(lbl) && !/\bto\s+\d/i.test(lbl)) return "fax";
+  if (/\bdea(?:\s*#|\s*number|\s*no\.?)?\b/i.test(lbl)) return "dea";
+  if (/\b(?:state\s+)?licen[sc]e(?:\s*#|\s*number|\s*no\.?)?\b/i.test(lbl) && !/\b(driver|plate|vehicle)\b/i.test(lbl)) return "license";
+  if (/\b(physician|provider|practitioner|doctor|clinician|prescriber|signer|supervisor)[\s']*s?\s*(?:printed\s+|typed\s+or\s+printed\s+)?name\b/i.test(lbl)) return "full_name";
+  if (/\b(physician|provider|practitioner|doctor|clinician|prescriber|duty|office)\s*(?:phone|tel|telephone|number|#)\b|^provider\s+—.*\b(?:commercial|phone|telephone)\b/i.test(lbl)) return "duty_phone";
+  if (/^\s*(?:phone|tel|telephone)\s*:?\s*$/i.test(lbl)) return "duty_phone";
+  if (/\b(title|position|rank|specialty)\b/i.test(lbl) && !/\b(course|document|form|note)\b/i.test(lbl)) return "title";
+  if (/\b(clinic|facility|department|mtf|practice)\b|^provider\s+—.*\b(?:mailing\s+)?address\b/i.test(lbl)) return "clinic";
+  if (/\be-?mail\b/i.test(lbl)) return "email";
+  return null;
+}
+
+async function autosaveSignerFields(fields) {
+  if (!model || model.blocked) return;
+  const byKey = new Map(((model && model.autocomplete) || []).map((x) => [x.key, x.value]));
+  const ptValues = new Set(patient ? Object.values(patient).filter(Boolean) : []);
+  const updates = {};
+  for (const f of fields || []) {
+    const key = signerAutosaveKey(f);
+    if (!key) continue;
+    const raw = vals[f.name];
+    if (typeof raw !== "string") continue;
+    const v = raw.trim();
+    if (!v || same(v, orig[f.name]) || /^(n\/a|na|none)$/i.test(v) || ptValues.has(v)) continue;
+    if (key === "npi" && v.replace(/\D+/g, "").length !== 10) continue;
+    if (byKey.get(key) === v) continue;
+    updates[key] = v;
+  }
+  if (!Object.keys(updates).length) return;
+  try {
+    const res = await (await api("/api/identity", { updates })).json();
+    if (res.ok && Array.isArray(res.autocomplete)) {
+      model.autocomplete = res.autocomplete;
+      updateAutocomplete();
+      updateFillAllAc();
+    }
+  } catch (e) {}
+}
+
 async function run(mode) {
+  await autosaveSignerFields(model && model.fields);
   if (mode === "fill") {
     modal((c) => { c.append(el("div", "spin"), el("h3", null, "Saving…")); });
     let res;

@@ -61,10 +61,10 @@ def _text_line_spans(page, text, geo, to_display):
     for line in text.splitlines(keepends=True):
         stripped = line.strip()
         if stripped and stripped != "\ufffc":
-            # Split multi-column lines on wide gaps or after colons preceding another label.
-            for m in re.finditer(r"[^\s].*?(?=\s{3,}|$)", line):
-                seg = m.group().strip()
-                if not seg or BLANK.fullmatch(seg):
+            tokens = []
+            for m in re.finditer(r"\S+", line):
+                seg = m.group()
+                if BLANK.fullmatch(seg):
                     continue
                 sel = page.selectionForRange_(_range(text, offset + m.start(), offset + m.end()))
                 if sel is None:
@@ -76,9 +76,29 @@ def _text_line_spans(page, text, geo, to_display):
                         float(b.origin.x + b.size.width), float(b.origin.y + b.size.height)]
                 box = _clamp_box(to_display(geo, rect))
                 if box:
-                    spans.append((box, seg))
+                    tokens.append((box, seg))
+            tokens.sort(key=lambda t: (round(t[0][1], 2), t[0][0]))
+            cur_box, cur_words = None, []
+            for tb, word in tokens:
+                prev = cur_words[-1] if cur_words else ""
+                colon_split = prev.endswith(":") and word.endswith(":") and len(cur_words) >= 1
+                if cur_box is None:
+                    cur_box, cur_words = list(tb), [word]
+                elif (not colon_split and abs(tb[1] - cur_box[1]) <= 0.012
+                      and -0.005 <= tb[0] - cur_box[2] <= 0.016):
+                    cur_box = [min(cur_box[0], tb[0]), min(cur_box[1], tb[1]),
+                               max(cur_box[2], tb[2]), max(cur_box[3], tb[3])]
+                    cur_words.append(word)
+                else:
+                    spans.append((cur_box, " ".join(cur_words)))
+                    cur_box, cur_words = list(tb), [word]
+            if cur_box:
+                spans.append((cur_box, " ".join(cur_words)))
         offset += len(line)
-    return spans
+    return [
+        sp for sp in spans
+        if not re.fullmatch(r"D\s*R\s*A\s*F\s*T", sp[1].strip()) and (sp[0][3] - sp[0][1]) < 0.042
+    ]
 
 
 def _detect_selectable_text(page, text, pi, geo, to_display, existing_widgets):
@@ -149,31 +169,44 @@ def _mat_pt(m, x, y):
 
 
 def _extract_vector_primitives(pdf_page):
-    """Parse horizontal rules, hollow checkbox squares, and diagonal marks from a PDF page."""
+    """Parse horizontal/vertical rules, hollow checkbox squares, and diagonal marks from a PDF page."""
     import pikepdf
     ctm = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
     stack = []
     sub_segs, sub_rects = [], []
     cur = None
     start_pt = None
-    rules, boxes, diagonals = [], [], []
+    rules, v_rules, short_h, short_v, boxes, diagonals = [], [], [], [], [], []
 
     def _flush(stroked, filled):
         nonlocal sub_segs, sub_rects, cur, start_pt
         if stroked or filled:
             for (x0, y0, x1, y1) in sub_segs:
                 dx, dy = abs(x1 - x0), abs(y1 - y0)
-                if stroked and dy <= 1.5 and dx >= 28.0:
+                if stroked and dy <= 1.8 and dx >= 28.0:
                     rules.append((min(x0, x1), (y0 + y1) / 2.0, max(x0, x1)))
+                elif stroked and dy <= 1.8 and 6.0 <= dx < 28.0:
+                    short_h.append((min(x0, x1), (y0 + y1) / 2.0, max(x0, x1)))
+                elif stroked and dx <= 1.8 and dy >= 10.0:
+                    v_rules.append(((x0 + x1) / 2.0, min(y0, y1), max(y0, y1)))
+                elif stroked and dx <= 1.8 and 6.0 <= dy < 26.0:
+                    short_v.append(((x0 + x1) / 2.0, min(y0, y1), max(y0, y1)))
                 elif stroked and dx >= 3.0 and dy >= 3.0:
                     diagonals.append((min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)))
             for (x0, y0, x1, y1) in sub_rects:
                 w, h = x1 - x0, y1 - y0
                 if h <= 3.0 and w >= 28.0:
                     rules.append((x0, (y0 + y1) / 2.0, x1))
+                elif h <= 3.0 and 6.0 <= w < 28.0:
+                    short_h.append((x0, (y0 + y1) / 2.0, x1))
+                elif w <= 3.0 and h >= 10.0:
+                    v_rules.append(((x0 + x1) / 2.0, y0, y1))
+                    if h <= 26.0:
+                        short_v.append(((x0 + x1) / 2.0, y0, y1))
+                elif w <= 3.0 and 6.0 <= h < 10.0:
+                    short_v.append(((x0 + x1) / 2.0, y0, y1))
                 elif stroked and not filled and 6.0 <= w <= 22.0 and 6.0 <= h <= 22.0 and 0.7 <= w / h <= 1.4:
                     boxes.append((x0, y0, x1, y1))
-            # Also detect 4-segment closed hollow square drawn via m/l/h/S.
             if stroked and not filled and len(sub_segs) == 4:
                 xs = [p for s in sub_segs for p in (s[0], s[2])]
                 ys = [p for s in sub_segs for p in (s[1], s[3])]
@@ -186,7 +219,7 @@ def _extract_vector_primitives(pdf_page):
     try:
         ops = pikepdf.parse_content_stream(pdf_page)
     except Exception:
-        return [], []
+        return [], [], []
 
     for operands, operator in ops:
         op = str(operator)
@@ -226,6 +259,26 @@ def _extract_vector_primitives(pdf_page):
         except Exception:
             continue
 
+    # Also reconstruct 4-edge hollow checkbox squares drawn as 4 separate thin bars/lines (DoD forms).
+    all_v_short = short_v + [v for v in v_rules if v[2] - v[1] <= 26.0]
+    for i, (hx0, hy0, hx1) in enumerate(short_h):
+        w = hx1 - hx0
+        if not (6.0 <= w <= 24.0):
+            continue
+        for bx0, by0, bx1 in short_h[i + 1:]:
+            if abs(bx0 - hx0) > 2.5 or abs(bx1 - hx1) > 2.5:
+                continue
+            y_lo, y_hi = min(hy0, by0), max(hy0, by0)
+            h = y_hi - y_lo
+            if not (6.0 <= h <= 24.0 and 0.68 <= w / h <= 1.45):
+                continue
+            has_l = any(abs(vx - hx0) <= 2.5 and vy0 <= y_lo + 2.5 and vy1 >= y_hi - 2.5 for vx, vy0, vy1 in all_v_short)
+            has_r = any(abs(vx - hx1) <= 2.5 and vy0 <= y_lo + 2.5 and vy1 >= y_hi - 2.5 for vx, vy0, vy1 in all_v_short)
+            if has_l and has_r:
+                cand = (min(hx0, bx0), y_lo, max(hx1, bx1), y_hi)
+                if not any(_overlaps(cand, prev, threshold=0.3) for prev in boxes):
+                    boxes.append(cand)
+
     # Filter out boxes that have diagonal marks (already checked X or ✓).
     clean_boxes = []
     for bx0, by0, bx1, by1 in boxes:
@@ -235,7 +288,7 @@ def _extract_vector_primitives(pdf_page):
         )
         if not marked:
             clean_boxes.append((bx0, by0, bx1, by1))
-    return rules, clean_boxes
+    return rules, clean_boxes, v_rules
 
 
 # ---------- Shared geometry-to-label pairing (display-fraction coordinates) ----------
@@ -279,7 +332,7 @@ def _pair_rules_and_boxes(rules_disp, boxes_disp, text_spans, pi, existing_widge
     # Pair horizontal rules
     for rx0, ry, rx1 in rules_disp:
         rw = rx1 - rx0
-        if rw < 0.055 or rw > 0.72 or ry < 0.07 or ry > 0.92:
+        if rw < 0.055 or rw > 0.86 or ry < 0.07 or ry > 0.92:
             continue
         if _text_on_rule(rx0, ry, rx1):
             continue
@@ -289,11 +342,11 @@ def _pair_rules_and_boxes(rules_disp, boxes_disp, text_spans, pi, existing_widge
         left_hits = []
         for tb, txt in text_spans:
             gap = rx0 - tb[2]
-            if -0.012 <= gap <= 0.065 and tb[1] - 0.014 <= ry <= tb[3] + 0.014:
-                left_hits.append((gap, txt))
+            if -0.012 <= gap <= 0.065 and tb[1] - 0.004 <= ry <= tb[3] + 0.014:
+                left_hits.append((abs(ry - tb[3]) > 0.012, abs(gap) + abs(ry - tb[3]) * 2.0, txt))
         if left_hits:
-            left_hits.sort(key=lambda item: item[0])
-            cand_txt = _label(left_hits[0][1])
+            left_hits.sort(key=lambda item: (item[0], item[1]))
+            cand_txt = _label(left_hits[0][2])
             if cand_txt and len(cand_txt) <= 90 and any(c.isalpha() for c in cand_txt):
                 label_text = cand_txt
 
@@ -312,7 +365,8 @@ def _pair_rules_and_boxes(rules_disp, boxes_disp, text_spans, pi, existing_widge
                     label_text = cand_txt
 
         # 3) Caption directly below the line (e.g. "Applicant Signature", "Date", "Printed Name")
-        if not label_text:
+        # Wide rules (> 0.72 of page width) without a left or colon-stacked label are section dividers.
+        if not label_text and rw <= 0.72:
             below_hits = []
             for tb, txt in text_spans:
                 vgap = tb[1] - ry
@@ -444,14 +498,182 @@ def _vision_text_spans(cg_img):
     return spans
 
 
+_SECTION_PATTERNS = (
+    ("Provider", re.compile(
+        r"\b(provider\s+information|part\s+c\s*-\s*provider|\d+\.\s*(?:a\.\s*)?provider\s+printed\s+name|"
+        r"efmp\s+medical\s+practitioner|physician'?s\s+authentication)\b", re.I)),
+    ("Admin", re.compile(
+        r"\b(for\s+administrative\s+use\s+only|administrative\s+certification|case\s+manager\s+contact|"
+        r"8\.\s*authentication\b|military\s+personnel\s+division)\b", re.I)),
+    ("Parent/Guardian", re.compile(
+        r"\b(parent\/guardian\s+or\s+person\s+of\s+majority|6\.\s*certification\b|"
+        r"authorization\s+for\s+disclosure)\b", re.I)),
+    ("Sponsor", re.compile(
+        r"^(?:\d+\.?\s*(?:a\.\s*)?(?:sponsor|service\s*member)\b|4\.a\.\s*are\s+both\s+spouses|"
+        r"5\.a\.\s*is\s+family\s+member\s+enrolled|part\s+a\s*-\s*soldier|1\.\s*name\s+of\s+soldier)", re.I)),
+    ("Patient", re.compile(
+        r"(?:^\d+\.?\s*(?:a\.\s*)?(?:exceptional\s+)?family\s+member|\b7\.?\s*family\s+members\b|"
+        r"^part\s+b\s*-\s*family\s+member\s+screening)", re.I)),
+    ("", re.compile(
+        r"^(?:medical\s+summary\b|part\s+[ab]\s*-\s*(?:patient\s+status|required\s+care)|addendum\s+\d)", re.I)),
+)
+_EXPLICIT_SUBJECT_RE = re.compile(
+    r"\b(sponsor|soldier|spouse|family\s+member|patient|provider|physician|practitioner|"
+    r"guardian|administrative|case\s+manager|military\s+personnel)\b", re.I,
+)
+
+
+def _merge_segments(h_raw, v_raw):
+    hs, vs = [], []
+    for x0, y, x1 in sorted(h_raw, key=lambda r: (round(r[1], 3), r[0])):
+        for m in hs:
+            if abs(y - m[1]) <= 0.0035 and x0 <= m[2] + 0.005 and x1 >= m[0] - 0.005:
+                m[0], m[2] = min(m[0], x0), max(m[2], x1)
+                break
+        else:
+            hs.append([x0, y, x1])
+    for x, y0, y1 in sorted(v_raw, key=lambda r: (round(r[0], 3), r[1])):
+        for m in vs:
+            if abs(x - m[0]) <= 0.0035 and y0 <= m[2] + 0.005 and y1 >= m[1] - 0.005:
+                m[1], m[2] = min(m[1], y0), max(m[2], y1)
+                break
+        else:
+            vs.append([x, y0, y1])
+    return hs, vs
+
+
+def _pair_grid_cells(h_raw, v_raw, boxes_disp, text_spans, pi, existing_widgets, candidates):
+    """Detect blank bordered table/form cells (e.g. DoD DD/DA forms) and return (cell_fields, vs)."""
+    hs, vs = _merge_segments(h_raw, v_raw)
+    if len(hs) < 2 or len(vs) < 2:
+        return [], vs
+    clean_spans = [
+        (tb, txt) for tb, txt in text_spans
+        if not re.fullmatch(r"D\s*R\s*A\s*F\s*T", txt.strip()) and (tb[3] - tb[1]) < 0.042
+    ]
+    if any("INSTRUCTIONS FOR COMPLETING" in txt.upper() for tb, txt in clean_spans if tb[1] < 0.14):
+        return [], vs
+
+    xs = sorted({round(v[0], 4) for v in vs})
+    ys = sorted({round(h[1], 4) for h in hs})
+    if len(xs) > 40 or len(ys) > 80:
+        return [], vs
+
+    def v_covers(x, y0, y1):
+        return any(abs(v[0] - x) <= 0.0045 and v[1] <= y0 + 0.006 and v[2] >= y1 - 0.006 for v in vs)
+
+    def h_covers(y, x0, x1):
+        return any(abs(h[1] - y) <= 0.0045 and h[0] <= x0 + 0.006 and h[2] >= x1 - 0.006 for h in hs)
+
+    raw_cells = []
+    for i, yt in enumerate(ys):
+        for yb in ys[i + 1:]:
+            ch = yb - yt
+            if ch < 0.012 or ch > 0.26:
+                continue
+            v_act = [x for x in xs if v_covers(x, yt, yb)]
+            for j in range(len(v_act) - 1):
+                xl, xr = v_act[j], v_act[j + 1]
+                if xr - xl < 0.045:
+                    continue
+                if not (h_covers(yt, xl, xr) and h_covers(yb, xl, xr)):
+                    continue
+                if any(yt + 0.006 < ym < yb - 0.006 and h_covers(ym, xl, xr) for ym in ys):
+                    continue
+                raw_cells.append((xl, yt, xr, yb))
+
+    cells = []
+    for c in raw_cells:
+        area_c = (c[2] - c[0]) * (c[3] - c[1])
+        if any(
+            o != c and (o[2] - o[0]) * (o[3] - o[1]) < area_c * 0.92 and _overlaps(o, c, threshold=0.5)
+            for o in raw_cells
+        ):
+            continue
+        cells.append(c)
+    cells.sort(key=lambda c: (round(c[1], 3), round(c[0], 3)))
+
+    sec_marks = []
+    for tb, txt in sorted(clean_spans, key=lambda s: (s[0][1], s[0][0])):
+        s = txt.strip()
+        for tag, pat in _SECTION_PATTERNS:
+            if pat.search(s):
+                sec_marks.append((tb[1], tag))
+                break
+
+    def section_at(y):
+        cur_tag = ""
+        for sy, tag in sec_marks:
+            if sy <= y + 0.008:
+                cur_tag = tag
+            else:
+                break
+        return cur_tag
+
+    def spans_in(xl, yt, xr, yb):
+        hits = [
+            (tb, txt) for tb, txt in clean_spans
+            if xl - 0.002 <= (tb[0] + tb[2]) / 2.0 <= xr + 0.002
+            and yt - 0.002 <= (tb[1] + tb[3]) / 2.0 <= yb + 0.002
+        ]
+        hits.sort(key=lambda s: (round(s[0][1], 3), s[0][0]))
+        return hits
+
+    out, header_cells = [], []
+    for xl, yt, xr, yb in cells:
+        cw, ch = xr - xl, yb - yt
+        if any(xl <= (b[0] + b[2]) / 2.0 <= xr and yt <= (b[1] + b[3]) / 2.0 <= yb for b in boxes_disp):
+            continue
+        cspans = spans_in(xl, yt, xr, yb)
+        sec = section_at(yt)
+        if cspans:
+            min_t = min(tb[1] for tb, _ in cspans)
+            max_b = max(tb[3] for tb, _ in cspans)
+            raw_lbl = _label(" ".join(txt for _, txt in cspans))
+            if not raw_lbl or not any(c.isalpha() for c in raw_lbl):
+                continue
+            if min_t <= yt + 0.020 and yb - max_b >= 0.010 and (max_b - yt) <= max(0.028, ch * 0.62):
+                if re.match(r"^(?:[a-z0-9.()]+\s+)*official\s+stamp$", raw_lbl, re.I):
+                    continue
+                if re.search(r"\b(privacy\s+act\s+statement|authority:|principal\s+purpose)\b", raw_lbl, re.I):
+                    continue
+                lbl = f"{sec} — {raw_lbl}" if (sec and not _EXPLICIT_SUBJECT_RE.search(raw_lbl)) else raw_lbl
+                kind = "signature" if SIGNATURE.search(raw_lbl) else "text"
+                box = _clamp_box([xl + 0.003, max_b + 0.001, xr - 0.003, yb - 0.002])
+                if box and not _already_covered(box, pi, existing_widgets, candidates) and not _already_covered(box, pi, [], out):
+                    out.append({"kind": kind, "label": lbl[:240], "page": pi, "box": box,
+                                "multiline": kind == "text" and (yb - max_b) >= 0.048})
+            elif ch <= 0.070:
+                header_cells.append((xl, yt, xr, yb, raw_lbl))
+        elif 0.011 <= ch <= 0.058:
+            hdr = next(
+                (hlbl for hxl, hyt, hxr, hyb, hlbl in header_cells
+                 if abs(hyb - yt) <= 0.005 and abs(hxl - xl) <= 0.008 and abs(hxr - xr) <= 0.008),
+                None,
+            )
+            if hdr and (cw >= 0.095 or re.search(r"\b(dob|date|fmp|rank|mos|ssn|sex|age)\b", hdr, re.I)):
+                lbl = f"{sec} — {hdr}" if (sec and not _EXPLICIT_SUBJECT_RE.search(hdr)) else hdr
+                box = _clamp_box([xl + 0.003, yt + 0.002, xr - 0.003, yb - 0.002])
+                if box and not _already_covered(box, pi, existing_widgets, candidates) and not _already_covered(box, pi, [], out):
+                    out.append({"kind": "text", "label": lbl[:240], "page": pi, "box": box, "multiline": False})
+    return out, vs
+
+
+def _is_grid_border(rx0, ry, rx1, vs):
+    has_l = any(abs(v[0] - rx0) <= 0.007 and v[1] - 0.007 <= ry <= v[2] + 0.007 for v in vs)
+    has_r = any(abs(v[0] - rx1) <= 0.007 and v[1] - 0.007 <= ry <= v[2] + 0.007 for v in vs)
+    return has_l and has_r
+
+
 def _raster_rules_and_boxes(gray):
     """Detect horizontal blank lines (tolerant of mild scan skew) and hollow checkbox squares."""
     W, H = gray.size
     raw = gray.tobytes()
     seg_min = max(18, int(W * 0.025))
-    min_run = max(36, int(W * 0.055))
-    max_run = int(W * 0.72)
-    margin_x, margin_y = int(W * 0.075), int(H * 0.075)
+    min_run = max(36, int(W * 0.050))
+    max_run = int(W * 0.86)
+    grid_max = int(W * 0.95)
+    margin_x, margin_y = int(W * 0.025), int(H * 0.025)
 
     # 1) Collect short dark horizontal runs (so mildly skewed lines stitch cleanly)
     row_runs = []
@@ -498,12 +720,16 @@ def _raster_rules_and_boxes(gray):
         if not matched:
             merged.append([y, y, s, e, y, y])
 
-    rules_disp = []
+    rules_disp, grid_h_disp = [], []
     for y0, y1, x0, x1, _, _ in merged:
         length = x1 - x0
-        if length < min_run or length > max_run or (y1 - y0) > 12:
+        if length < min_run or length > grid_max or (y1 - y0) > 12:
             continue
-        # Verify clear whitespace above the line (excludes thick bars or text baselines)
+        ym = ((y0 + y1) / 2.0) / H
+        grid_h_disp.append((x0 / W, ym, x1 / W))
+        if length > max_run:
+            continue
+        # Verify clear whitespace above free-standing lines (excludes thick bars or text baselines)
         check_y0 = max(margin_y, y0 - 12)
         check_y1 = max(check_y0 + 1, y0 - 2)
         dark = 0
@@ -515,12 +741,43 @@ def _raster_rules_and_boxes(gray):
                     dark += 1
         if dark / total > 0.08:
             continue
-        rules_disp.append((x0 / W, ((y0 + y1) / 2.0) / H, x1 / W))
+        rules_disp.append((x0 / W, ym, x1 / W))
 
-    # 3) Detect hollow checkbox squares (side 10..30 px at 1.5x) via top-edge runs
-    cb_min, cb_max = max(9, int(W * 0.010)), max(24, int(W * 0.034))
+    # 2b) Collect vertical dark runs for bordered grid cell reconstruction on scans (skip glyph stems <28pt)
+    v_seg_min = max(36, int(H * 0.032))
+    col_runs = []
+    for x in range(margin_x, W - margin_x):
+        y, end_y = margin_y, H - margin_y
+        while y < end_y:
+            if raw[y * W + x] < 185:
+                s, gaps = y, 0
+                while y < end_y:
+                    if raw[y * W + x] < 185:
+                        gaps = 0
+                    else:
+                        gaps += 1
+                        if gaps > 1:
+                            break
+                    y += 1
+                e = y - gaps
+                if e - s >= v_seg_min:
+                    col_runs.append((x, s, e))
+            else:
+                y += 1
+    v_merged = []
+    for x, s, e in col_runs:
+        for m in v_merged:
+            if (abs(x - m[1]) <= 3 or abs(x - m[0]) <= 3) and s <= m[3] + 8 and e >= m[2] - 8 and x - m[0] <= 10:
+                m[0], m[1], m[2], m[3] = min(m[0], x), max(m[1], x), min(m[2], s), max(m[3], e)
+                break
+        else:
+            v_merged.append([x, x, s, e])
+    grid_v_disp = [(((x0 + x1) / 2.0) / W, y0 / H, y1 / H) for x0, x1, y0, y1 in v_merged if (x1 - x0) <= 10]
+
+    # 3) Detect hollow checkbox squares (side 14..30 px at 1.5x; excludes 10-12pt letter counters like 'D'/'O')
+    cb_min, cb_max = max(14, int(W * 0.015)), max(24, int(W * 0.034))
     boxes_disp = []
-    for y in range(margin_y, H - margin_y - cb_max):
+    for y in range(margin_y, int(H * 0.925) - cb_max):
         off = y * W
         x = margin_x
         end_x = W - margin_x - cb_min
@@ -568,7 +825,7 @@ def _raster_rules_and_boxes(gray):
             else:
                 x += 1
 
-    return rules_disp, boxes_disp
+    return rules_disp, boxes_disp, grid_h_disp, grid_v_disp
 
 
 def _detect_scanned_page(path, pi, existing_widgets, candidates):
@@ -578,8 +835,13 @@ def _detect_scanned_page(path, pi, existing_widgets, candidates):
     ocr_spans = _vision_text_spans(cg_img)
     if not ocr_spans:
         return []
-    rules_disp, boxes_disp = _raster_rules_and_boxes(gray)
-    out = _pair_rules_and_boxes(rules_disp, boxes_disp, ocr_spans, pi, existing_widgets, candidates)
+    if any("INSTRUCTIONS FOR COMPLETING" in txt.upper() for tb, txt in ocr_spans if tb[1] < 0.14):
+        return []
+    rules_disp, boxes_disp, grid_h_disp, grid_v_disp = _raster_rules_and_boxes(gray)
+    grid_out, vs = _pair_grid_cells(grid_h_disp, grid_v_disp, boxes_disp, ocr_spans, pi, existing_widgets, candidates)
+    free_rules = [r for r in rules_disp if not _is_grid_border(r[0], r[1], r[2], vs)]
+    out = list(grid_out)
+    out.extend(_pair_rules_and_boxes(free_rules, boxes_disp, ocr_spans, pi, existing_widgets, candidates + out))
 
     # Also catch ASCII `[ ]` empty checkboxes recognized verbatim by Vision OCR
     for tb, txt in ocr_spans:
@@ -623,20 +885,32 @@ def suggest_fields(path, model, geometry, to_display):
             alnum_count = len(re.findall(r"[A-Za-z0-9]", text))
 
             if alnum_count >= 20:
+                if "INSTRUCTIONS FOR COMPLETING" in text[:300].upper():
+                    continue
                 # 1) Selectable-text printed blanks
                 candidates.extend(_detect_selectable_text(page, text, pi, geo, to_display, existing_widgets))
-                # 2) Vector-drawn fill lines & hollow checkbox squares paired with PDFKit text
-                rules_pdf, boxes_pdf = _extract_vector_primitives(pdf.pages[pi])
-                if rules_pdf or boxes_pdf:
+                # 2) Vector-drawn grid cells, fill lines & hollow checkbox squares paired with PDFKit text
+                rules_pdf, boxes_pdf, v_rules_pdf = _extract_vector_primitives(pdf.pages[pi])
+                if rules_pdf or boxes_pdf or v_rules_pdf:
                     spans = _text_line_spans(page, text, geo, to_display)
                     rules_disp = []
                     for rx0, ry, rx1 in rules_pdf:
                         b = _clamp_box(to_display(geo, [rx0, ry, rx1, ry + 1.0]))
                         if b:
                             rules_disp.append((b[0], b[3], b[2]))
+                    v_disp = []
+                    for vx, vy0, vy1 in v_rules_pdf:
+                        b = _clamp_box(to_display(geo, [vx, vy0, vx + 1.0, vy1]))
+                        if b:
+                            v_disp.append((b[0], b[1], b[3]))
                     boxes_disp = [b for r in boxes_pdf if (b := _clamp_box(to_display(geo, r)))]
+                    grid_out, vs = _pair_grid_cells(
+                        rules_disp, v_disp, boxes_disp, spans, pi, existing_widgets, candidates
+                    )
+                    candidates.extend(grid_out)
+                    free_rules = [r for r in rules_disp if not _is_grid_border(r[0], r[1], r[2], vs)]
                     candidates.extend(_pair_rules_and_boxes(
-                        rules_disp, boxes_disp, spans, pi, existing_widgets, candidates
+                        free_rules, boxes_disp, spans, pi, existing_widgets, candidates
                     ))
             else:
                 # 3) Scanned / image-only page: macOS Vision OCR + raster geometry
@@ -645,7 +919,7 @@ def suggest_fields(path, model, geometry, to_display):
     candidates.sort(key=lambda c: (c["page"], c["box"][1], c["box"][0]))
     fields, signatures = [], []
     names = {f["name"] for f in model["fields"]}
-    for item in candidates[:100]:
+    for item in candidates[:400]:
         if item["kind"] == "signature":
             signatures.append(item)
             continue
@@ -657,6 +931,7 @@ def suggest_fields(path, model, geometry, to_display):
         fields.append({"name": name, "label": item["label"], "kind": item["kind"],
                        "value": False if item["kind"] == "checkbox" else "",
                        "widgets": [{"page": item["page"], "box": item["box"]}],
-                       "readonly": False, "locked": False, "required": False, "multiline": False,
+                       "readonly": False, "locked": False, "required": False,
+                       "multiline": bool(item.get("multiline")),
                        "editable": True, "added": True, "detected": True})
     return fields, signatures
