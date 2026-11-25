@@ -314,20 +314,13 @@ digest never matched the bytes Acrobat wrote to the Mac through Citrix drive map
 | `install.sh` | Installer, updater and `--uninstall`. |
 | `cac_sign_launch.py` | The `cac-sign` command for PyPI/Homebrew installs: routing and `--setup`. |
 | `RELEASING.md`, `scripts/test-installer.sh`, `scripts/test-uv-install.sh` | The release checklist, and the scratch-HOME checks for the curl installer and a uv/PyPI install. |
-| `tests/test_cac_sign.py` | End-to-end tests on synthetic forms with throwaway certs: `uv run --with pytest pytest -q tests`. |
+| `cac_sign_desktop.py` | Sealed stdin/stdout JSON-RPC desktop worker (`--serve` persistent session + one-shot mode) used by `CACSign.app`: wraps the 3-reader gate, staging snapshot, incremental fill/sign, visual diff, `0600` `personas.json` <-> `identity.json` sync, user `profiles/`, ledger, and diagnostics with proxy env stripped. |
+| `macos/*.swift` | Native macOS Swift application (`CACSign.app`): `CACSignApp`, `Models`, `DesktopBridge` (POSIX `Darwin.read` pipe client), `TokenMonitor` (`CryptoTokenKit` + DER KeyUsage/expiry inspector), `PatientClipboard` (RAM-only 4-party firewall), `PDFPageCanvasView` (read-only `CGPDFDocument` + interactive overlays; never calls `PDFDocument.write`), `WorkspaceViewModel`, `MainWindowView`, `SettingsView` (`⌘,`), `ProfileBuilderSheet`, `PostSignActionBar`, `AdvisoryFillController`, `ServicesProvider`, `MakeIcon`. |
+| `scripts/build_macos_app.py`, `scripts/install_macos_app.sh` | Self-contained `CACSign.app` builder (`Contents/Resources/python` + `Contents/Resources/app` + `Contents/Resources/bin/cac-sign` + `bundle-receipt.json` + inside-out `codesign --verify --strict --deep`) and atomic `/Applications/CACSign.app` installer with reversible backup. |
+| `tests/test_cac_sign.py`, `tests/test_desktop_worker.py`, `tests/native_macos_tests.swift` | End-to-end Python and native Swift test suites on synthetic forms with throwaway certs. |
 | `pyproject.toml` / `uv.lock` / `requirements.txt` | Dependencies: reportlab, pikepdf, pyhanko[pkcs11], and on macOS pyobjc-framework-Security (native signing) and pyobjc-framework-Quartz (page rendering). |
 
 ## Open items
 
-- First-run setup in the review page, instead of the installer prompt.
-- "Remember this form", which creates profiles from the page.
-- An email hand-off that only drafts, never sends.
-- A card check up front, plus a certificate-expiry warning.
-- Bulk signing in the page. Bulk "one PIN for many" stays on `--opensc`, because
-  macOS asks for the PIN once per signature.
 - An OCSP revocation check, with optional LTV.
-- A read-only install (code not writable by the user), and profiles taken only from
-  the reviewed repo.
 - Intel Macs: would need `cryptography` held below 49 for x86_64.
-- The quick Quick Action's native-PIN path is the same signer the review page uses,
-  but has itself been run live only on the OpenSC route.

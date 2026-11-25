@@ -26,3 +26,5 @@ identity.json
 
 # Build output
 dist/
+build/
+*.app/

@@ -1408,7 +1408,7 @@ def vector_flat_form(tmp_path):
     c.drawString(72, 695, "Applicant Name:")
     c.line(162, 693, 380, 693)
     c.drawString(72, 665, "Unit:")
-    c.drawString(115, 667, "TAMC FM")
+    c.drawString(115, 667, "EXAMPLE CLINIC")
     c.line(108, 663, 300, 663)  # already filled: must ignore
     c.drawString(72, 635, "Course Date:")
     c.line(72, 616, 230, 616)  # stacked label ending with ':'
@@ -1484,7 +1484,7 @@ def test_review_model_includes_autocomplete_without_prefilling_detected_fields(v
     ident.write_text(json.dumps({
         "full_name": "Dr. Example User",
         "title": "Program Director",
-        "duty_phone": "808-555-0199",
+        "duty_phone": "555-555-0199",
         "npi": "1234567890",
     }))
     monkeypatch.setattr(cac_sign, "IDENTITY_FILE", str(ident))
@@ -1492,7 +1492,7 @@ def test_review_model_includes_autocomplete_without_prefilling_detected_fields(v
     ac = {item["key"]: item["value"] for item in model["autocomplete"]}
     assert ac["full_name"] == "Dr. Example User"
     assert ac["title"] == "Program Director"
-    assert ac["duty_phone"] == "808-555-0199"
+    assert ac["duty_phone"] == "555-555-0199"
     assert ac["npi"] == "1234567890"
     assert "today" in ac and "today_us" in ac
     # Detected fields still start blank; autocomplete is explicit click/type-ahead only.

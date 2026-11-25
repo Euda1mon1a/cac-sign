@@ -34,8 +34,10 @@ from cac_signing import (SigningCancelled, SigningError, build_keychain_signer, 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROFILE_DIR = os.path.join(HERE, "profiles")
 # Your data lives here, apart from the code, so reinstalling or updating never touches it.
-APP_SUPPORT = os.path.expanduser("~/Library/Application Support/cac-sign")
+_DEFAULT_APP_SUPPORT = os.path.expanduser("~/Library/Application Support/cac-sign")
+APP_SUPPORT = os.path.expanduser(os.environ.get("CAC_SIGN_APP_SUPPORT") or _DEFAULT_APP_SUPPORT)
 IDENTITY_FILE = os.path.join(APP_SUPPORT, "identity.json")
+USER_PROFILE_DIR = os.path.join(APP_SUPPORT, "profiles")
 
 
 def say(*lines):
@@ -311,13 +313,36 @@ def set_field(writer, acroform, field, value, cache):
 
 # ---------- profiles ----------
 def load_profiles():
-    out = []
+    by_id, order = {}, []
     for p in sorted(glob.glob(os.path.join(PROFILE_DIR, "*.json"))):
-        with open(p) as f:
+        with open(p, encoding="utf-8") as f:
             prof = json.load(f)
-        prof.setdefault("id", os.path.splitext(os.path.basename(p))[0])
-        out.append(prof)
-    return out
+        pid = prof.setdefault("id", os.path.splitext(os.path.basename(p))[0])
+        prof["source"] = "bundled"
+        if pid not in by_id:
+            order.append(pid)
+        by_id[pid] = prof
+    user_dir = USER_PROFILE_DIR
+    skip_real_in_pytest = (
+        "PYTEST_CURRENT_TEST" in os.environ
+        and not os.environ.get("CAC_SIGN_APP_SUPPORT")
+        and user_dir == os.path.join(_DEFAULT_APP_SUPPORT, "profiles")
+    )
+    if user_dir and not skip_real_in_pytest and os.path.isdir(user_dir):
+        for p in sorted(glob.glob(os.path.join(user_dir, "*.json"))):
+            try:
+                with open(p, encoding="utf-8") as f:
+                    prof = json.load(f)
+            except (OSError, ValueError):
+                continue
+            if not isinstance(prof, dict):
+                continue
+            pid = prof.setdefault("id", os.path.splitext(os.path.basename(p))[0])
+            prof["source"] = "user"
+            if pid not in by_id:
+                order.append(pid)
+            by_id[pid] = prof
+    return [by_id[pid] for pid in order]
 
 
 def detect_profile(profiles, fields, forced=None):

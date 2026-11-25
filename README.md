@@ -37,7 +37,22 @@ applicant's signature stays valid when you counter-sign.
 
 This is a personal project. It is not an official DoD or Army tool.
 
-## Install
+## Native macOS App (`CACSign.app`)
+
+From a checkout with `.venv` synced, build and install the self-contained native macOS Swift app (`/Applications/CACSign.app`, bundling its own standalone Python 3.12 verification and incremental-signing worker):
+
+```
+./scripts/install_macos_app.sh --rebuild
+```
+
+`CACSign.app` replaces the local browser tab with a native macOS workspace:
+- **Live CAC & certificate toolbar pill (`CryptoTokenKit`):** Detects card insertion/removal in real time, selects your Non-Repudiation signing certificate, warns before expiry, and checks DoD Root CA trust in Keychain.
+- **Multi-persona Settings (`⌘,`):** Manage multiple signer personas (for example clinic vs. external fax) synced atomically (`0600`) to `~/Library/Application Support/cac-sign/identity.json`, browse and verify entries in your signing ledger (`ledger.jsonl`), manage reusable form profiles, and run LibreOffice / OpenSC / Keychain diagnostics.
+- **Multi-file queue & read-only `CoreGraphics` canvas:** Drop multiple PDFs or `.docx` files, paste patient demographics (`⌘V`, kept strictly in volatile RAM with 4-party isolation), use **Fill matched (`⌘K`)**, place or resize text/checkbox/signature boxes on flat or scanned forms, save a reusable template via **Remember Form…**, or **Batch Sign Ready** (automatically halting on PIN cancel or card error to prevent 3-strike CAC lockout).
+- **Post-sign handoff:** Drag the verified `*_signed.pdf` pill directly into an EHR or web upload box, preview with Quick Look, reveal in Finder, or open an unsent email draft (`NSSharingService`, never auto-sends).
+- **Finder Services & CLI:** Registers native `CAC Sign…` (review) and `CAC Sign` (quick confirm) Finder Services, while preserving the full `cac-sign` Terminal CLI.
+
+## Install (CLI & Web Fallback)
 
 You need an Apple silicon Mac (M1 or later), a CAC reader, and the DoD
 certificates in your keychain (see [Requirements](#requirements)). Then, in Terminal:
