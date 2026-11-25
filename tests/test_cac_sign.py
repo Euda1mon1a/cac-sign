@@ -1497,3 +1497,382 @@ def test_review_model_includes_autocomplete_without_prefilling_detected_fields(v
     assert "today" in ac and "today_us" in ac
     # Detected fields still start blank; autocomplete is explicit click/type-ahead only.
     assert all(f["value"] in ("", False) for f in model["fields"] if f.get("detected"))
+
+
+def test_detects_wide_labeled_address_lines_and_keeps_same_row_dob_label(tmp_path):
+    """Wide inline lines (>72% width) after a label are detected, and next-row labels never steal a baseline."""
+    from reportlab.lib.utils import ImageReader
+    vec = tmp_path / "dme_vec.pdf"
+    c = canvas.Canvas(str(vec), pagesize=(612, 792))
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(36, 740, "DME ORDER FORM")
+    c.line(36, 730, 560, 730)  # wide unlabelled header divider: must ignore
+    c.setFont("Helvetica", 10)
+    c.drawString(36, 680, "First name:")
+    c.line(94, 678, 275, 678)
+    c.drawString(296, 680, "Last name:")
+    c.line(355, 678, 556, 678)
+    c.drawString(36, 660, "Street address:")
+    c.line(108, 658, 556, 658)  # width ~0.732 (>0.72)
+    c.drawString(36, 640, "City/state/zip:")
+    c.line(102, 638, 556, 638)  # width ~0.742 (>0.72)
+    c.drawString(36, 622, "Date of birth:")
+    c.line(98, 620, 275, 620)
+    # Tight next row (~17pt below) whose label right-edge sits right under x=98: must NOT steal Date of birth.
+    c.drawString(36, 605, "Patient phone:")
+    c.line(103, 603, 275, 603)
+    c.line(140, 120, 295, 120)
+    c.drawString(36, 122, "Physician signature:")
+    c.save()
+
+    png = cac_sign_editor.render_page(str(vec), 0, scale=2.0)
+    scan = tmp_path / "dme_scan.pdf"
+    sc = canvas.Canvas(str(scan), pagesize=(612, 792))
+    sc.drawImage(ImageReader(io.BytesIO(png)), 0, 0, width=612, height=792)
+    sc.save()
+
+    for target in (vec, scan):
+        model = cac_sign_editor.review_model(str(target))
+        labels = [f["label"] for f in model["fields"]]
+        assert labels == [
+            "First name",
+            "Last name",
+            "Street address",
+            "City/state/zip",
+            "Date of birth",
+            "Patient phone",
+        ], (target.name, labels)
+        assert model["suggested_signature"]["label"] == "Physician signature"
+
+
+def test_editor_patient_clipboard_paste_and_provider_namespace_isolation(tmp_path):
+    """Verify editor.html JS parses GENERAL INFORMATION demographics and isolates patient vs signer fields."""
+    import pathlib, re, shutil, subprocess
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+    html = pathlib.Path(cac_sign_editor.PAGE_HTML).read_text(encoding="utf-8")
+    m = re.search(r'<script nonce="\{\{NONCE\}\}">\s*(.*?)\s*</script>', html, re.S)
+    assert m, "inline script missing"
+    script_src = m.group(1)
+    # Strip top-level browser bootstrap lines after function declarations so functions can run under Node VM.
+    harness = r"""
+const vm = require("node:vm");
+const fs = require("node:fs");
+const src = fs.readFileSync(process.env.EDITOR_JS_FILE, "utf8");
+function makeEl(tag) {
+  return {
+    tagName: (tag || "DIV").toUpperCase(), style: {}, dataset: {}, children: [], hidden: false, disabled: false,
+    classList: { add(){}, remove(){}, toggle(){}, contains(){ return false; } },
+    append(...xs){ this.children.push(...xs); }, appendChild(x){ this.children.push(x); return x; },
+    replaceChildren(...xs){ this.children = [...xs]; }, setAttribute(){}, addEventListener(){},
+    querySelector(){ return null; }, querySelectorAll(){ return []; }, getBoundingClientRect(){ return { width: 800, height: 24 }; },
+  };
+}
+const els = new Map();
+const doc = {
+  activeElement: { tagName: "BODY" }, hidden: false,
+  getElementById(id){ if (!els.has(id)) els.set(id, makeEl("div")); return els.get(id); },
+  createElement(t){ return makeEl(t); }, createTextNode(t){ return { textContent: t }; },
+  querySelectorAll(){ return []; }, addEventListener(){},
+};
+const ctx = {
+  document: doc, window: { addEventListener(){}, removeEventListener(){} },
+  location: { hash: "#tok" }, history: { replaceState(){} }, sessionStorage: { setItem(){}, getItem(){ return "tok"; } },
+  navigator: {}, URL: { createObjectURL(){ return "blob:1"; }, revokeObjectURL(){} },
+  ResizeObserver: class { observe(){} },
+  fetch: async () => ({ ok: true, status: 200, json: async () => [] }),
+  setInterval: () => 1, clearInterval(){}, setTimeout(){}, requestAnimationFrame(){},
+};
+vm.createContext(ctx);
+vm.runInContext(src + `
+globalThis.__test = (formModel, clip) => {
+  model = formModel; vals = {}; orig = {}; prop = {}; patient = null; patientApplied = {};
+  for (const f of model.fields) { vals[f.name] = f.value; orig[f.name] = f.value; }
+  const pasted = applyPatientPaste(clip);
+  const afterPaste = { ...vals };
+  fillAllMatched();
+  const afterCmdK = { ...vals };
+  clearPatient();
+  const afterClear = { ...vals };
+  return { parsed: parsePatientClipboard(clip), pasted, afterPaste, afterCmdK, afterClear };
+};
+`, ctx);
+const fields = [
+  ["f_date1", "Date"], ["f_dx", "Dx"], ["f_fn", "First name"], ["f_ln", "Last name"],
+  ["f_addr", "Street address"], ["f_csz", "City/state/zip"], ["f_dob", "Date of birth"],
+  ["f_pph", "Patient phone"], ["f_ins_name", "Primary insurance name"], ["f_ins_id", "Insurance ID"],
+  ["f_date2", "Date"], ["f_doc", "Physician name"], ["f_npi", "NPI#"], ["f_ph", "Phone"], ["f_fax", "FAX"],
+].map(([name, label], i) => ({
+  name, label, kind: "text", value: "", editable: true, readonly: false, locked: false, required: false,
+  widgets: [{ page: 0, box: [0.1, 0.2 + i * 0.03, 0.4, 0.22 + i * 0.03] }],
+}));
+fields.push({ name: "f_cb", label: "E0601 CPAP", kind: "checkbox", value: false, editable: true, readonly: false, locked: false, widgets: [{ page: 0, box: [0.1, 0.5, 0.12, 0.52] }] });
+const formModel = {
+  file: "synthetic.pdf", pages: [{ w: 612, h: 792 }], blocked: null, fields,
+  autocomplete: [
+    { key: "name", value: "Dr. Signer Example" },
+    { key: "phone", value: "555-555-0199" },
+    { key: "fax", value: "555-555-0198" },
+    { key: "npi", value: "1234567890" },
+    { key: "today_us", value: "11/24/2026" },
+  ],
+};
+const clip = [
+  "GENERAL INFORMATION", "Full Name:", "Sample, Jordan Taylor", "Age:", "34 years",
+  "Date of Birth:", "04/15/1992 00:00:00 CST", "Sex:", "Female", "MRN:", "90000012345",
+  "SSN:", "", "Religion:", "None", "Home Address:", "100 EXAMPLE AVE", "", "", "SPRINGFIELD, IL 627041234",
+  "County:", "", "Home Phone:", "+ 5555550142", "Bus Phone:", "", "Insurance Number:", "99900011100",
+].join("\n");
+console.log(JSON.stringify(ctx.__test(formModel, clip)));
+"""
+    js_path = tmp_path / "editor_inline.js"
+    js_path.write_text(script_src, encoding="utf-8")
+    env = dict(os.environ, EDITOR_JS_FILE=str(js_path))
+    proc = subprocess.run([node, "-e", harness], env=env, capture_output=True, text=True, check=True)
+    res = json.loads(proc.stdout)
+    assert res["pasted"] == {"ok": True, "filled": 7}
+    ap = res["afterPaste"]
+    assert ap["f_fn"] == "Jordan Taylor"
+    assert ap["f_ln"] == "Sample"
+    assert ap["f_addr"] == "100 EXAMPLE AVE"
+    assert ap["f_csz"] == "SPRINGFIELD, IL 62704-1234"
+    assert ap["f_dob"] == "04/15/1992"
+    assert ap["f_pph"] == "555-555-0142"
+    assert ap["f_ins_id"] == "99900011100"
+    # Provider, clinical, insurance-carrier, and checkbox fields stay untouched on patient paste.
+    assert ap["f_ins_name"] == "" and ap["f_doc"] == "" and ap["f_ph"] == "" and ap["f_cb"] is False
+    # ⌘K fills only provider/date fields and never overwrites Primary insurance name or patient fields.
+    ak = res["afterCmdK"]
+    assert ak["f_doc"] == "Dr. Signer Example"
+    assert ak["f_npi"] == "1234567890"
+    assert ak["f_ph"] == "555-555-0199"
+    assert ak["f_fax"] == "555-555-0198"
+    assert ak["f_date1"] == "11/24/2026" and ak["f_date2"] == "11/24/2026"
+    assert ak["f_ins_name"] == "" and ak["f_fn"] == "Jordan Taylor" and ak["f_pph"] == "555-555-0142"
+    # Clear patient reverts only auto-pasted patient fields and preserves provider fills.
+    ac = res["afterClear"]
+    assert ac["f_fn"] == "" and ac["f_ln"] == "" and ac["f_addr"] == "" and ac["f_dob"] == ""
+    assert ac["f_doc"] == "Dr. Signer Example" and ac["f_ph"] == "555-555-0199"
+
+
+def test_editor_autosaves_signer_npi_and_fax_without_persisting_patient_fields(tmp_path, editor):
+    """/api/identity saves validated provider details (0600) and JS autosave excludes patient fields."""
+    import pathlib, re, shutil, subprocess
+    res = json.loads(call(editor, "/api/identity", {
+        "updates": {
+            "npi": "123-456-7890",
+            "fax": "555-555-0198",
+            "clinic": "Example Family Clinic",
+            "patient_phone": "555-555-0142",  # disallowed key: must be ignored
+            "full_name": "N/A",               # sentinel: must be ignored
+        }
+    })[2])
+    assert res["ok"]
+    saved = cac_sign.load_identity()
+    assert saved == {"npi": "1234567890", "fax": "555-555-0198", "clinic": "Example Family Clinic"}
+    assert (os.stat(cac_sign.IDENTITY_FILE).st_mode & 0o777) == 0o600
+
+    # Incomplete NPI (<10 digits) must not overwrite a valid saved NPI.
+    call(editor, "/api/identity", {"updates": {"npi": "12345"}})
+    assert cac_sign.load_identity()["npi"] == "1234567890"
+
+    node = shutil.which("node")
+    if not node:
+        return
+    html = pathlib.Path(cac_sign_editor.PAGE_HTML).read_text(encoding="utf-8")
+    script_src = re.search(r'<script nonce="\{\{NONCE\}\}">\s*(.*?)\s*</script>', html, re.S).group(1)
+    js_path = tmp_path / "autosave_test.js"
+    js_path.write_text(script_src, encoding="utf-8")
+    harness = r"""
+const vm = require("node:vm"), fs = require("node:fs");
+const makeEl = () => ({ tagName: "DIV", style: {}, dataset: {}, children: [], hidden: false, disabled: false,
+  classList: { add(){}, remove(){}, toggle(){}, contains(){ return false; } },
+  append(){}, appendChild(x){ return x; }, replaceChildren(){}, setAttribute(){}, addEventListener(){},
+  querySelector(){ return null; }, querySelectorAll(){ return []; }, getBoundingClientRect(){ return { width: 800, height: 24 }; } });
+const posted = [];
+const els = new Map();
+const ctx = {
+  document: { activeElement: { tagName: "BODY" }, hidden: false, getElementById(id){ if (!els.has(id)) els.set(id, makeEl()); return els.get(id); },
+    createElement: makeEl, createTextNode: (t) => ({ textContent: t }), querySelectorAll: () => [], addEventListener(){} },
+  window: { addEventListener(){}, removeEventListener(){} }, location: { hash: "#t" }, history: { replaceState(){} },
+  sessionStorage: { setItem(){}, getItem(){ return "t"; } }, navigator: {}, URL: { createObjectURL(){ return "b:1"; }, revokeObjectURL(){} },
+  ResizeObserver: class { observe(){} },
+  fetch: async (url, opts) => {
+    if (url === "/api/identity") posted.push(JSON.parse(opts.body));
+    return { ok: true, status: 200, json: async () => ({ ok: true, autocomplete: [{ key: "npi", value: "1098765432" }, { key: "fax", value: "555-555-0100" }] }) };
+  },
+  setInterval: () => 1, clearInterval(){}, setTimeout(){}, requestAnimationFrame(){},
+};
+vm.createContext(ctx);
+vm.runInContext(fs.readFileSync(process.env.JSF, "utf8") + `
+globalThis.check = async () => {
+  model = { file: "x.pdf", pages: [{ w: 612, h: 792 }], blocked: null, autocomplete: [], fields: [
+    { name: "fn", label: "First name", kind: "text", value: "", editable: true, readonly: false, locked: false, widgets: [{ page: 0, box: [0,0,1,1] }] },
+    { name: "pph", label: "Patient phone", kind: "text", value: "", editable: true, readonly: false, locked: false, widgets: [{ page: 0, box: [0,0,1,1] }] },
+    { name: "npi", label: "NPI#", kind: "text", value: "", editable: true, readonly: false, locked: false, widgets: [{ page: 0, box: [0,0,1,1] }] },
+    { name: "fax", label: "FAX", kind: "text", value: "", editable: true, readonly: false, locked: false, widgets: [{ page: 0, box: [0,0,1,1] }] },
+    { name: "ph", label: "Phone", kind: "text", value: "", editable: true, readonly: false, locked: false, widgets: [{ page: 0, box: [0,0,1,1] }] },
+  ]};
+  vals = { fn: "", pph: "", npi: "", fax: "", ph: "" }; orig = { ...vals }; prop = {};
+  applyPatientPaste("GENERAL INFORMATION\\nFull Name:\\nSample, Pat\\nHome Phone:\\n5555550142");
+  vals.npi = "1098765432";
+  vals.fax = "555-555-0100";
+  vals.ph = "555-555-0142"; // accidentally equals patient phone -> must NOT autosave as duty_phone!
+  await autosaveSignerFields(model.fields);
+};`, ctx);
+ctx.check().then(() => console.log(JSON.stringify(posted)));
+"""
+    out = json.loads(subprocess.run([node, "-e", harness], env=dict(os.environ, JSF=str(js_path)), capture_output=True, text=True, check=True).stdout)
+    assert out == [{"updates": {"npi": "1098765432", "fax": "555-555-0100"}}]
+
+
+def test_efmp_bordered_grid_detection_and_three_party_isolation(tmp_path, certs):
+    """Synthetic EFMP (DD 2792 / DA 5888 style) 4-bar bordered grid + checkboxes + Sponsor/Patient/Admin/Provider split."""
+    import pathlib, re, shutil, subprocess
+    pdf_path = tmp_path / "synthetic_efmp.pdf"
+    c = canvas.Canvas(str(pdf_path), pagesize=(612, 792))
+
+    def bar_h(x0, y, x1):
+        c.rect(x0, y - 0.5, x1 - x0, 1.0, stroke=0, fill=1)
+
+    def bar_v(x, y0, y1):
+        c.rect(x - 0.5, y0, 1.0, y1 - y0, stroke=0, fill=1)
+
+    def grid_box(x0, y0, x1, y1):
+        bar_h(x0, y0, x1); bar_h(x0, y1, x1); bar_v(x0, y0, y1); bar_v(x1, y0, y1)
+
+    # Outer header + 4-bar checkbox (DoD LiveCycle style: 4 thin filled rects)
+    c.setFont("Helvetica-Bold", 10)
+    c.drawString(120, 752, "DEMOGRAPHICS/CERTIFICATION")
+    grid_box(36, 700, 576, 742)
+    grid_box(42, 712, 54, 724)  # 12x12 checkbox drawn via 4 filled bars
+    c.setFont("Helvetica", 6)
+    c.drawString(60, 715, "EFMP REGISTRATION/ENROLLMENT UPDATE")
+
+    # Row: 2.a Family Member Name | b. Sponsor Name | d. Sponsor SSN
+    grid_box(36, 650, 260, 692); c.drawString(40, 683, "2.a. FAMILY MEMBER/PATIENT NAME (Last, First, Middle Initial)")
+    grid_box(260, 650, 450, 692); c.drawString(264, 683, "b. SPONSOR NAME (Last, First, Middle Initial)")
+    grid_box(450, 650, 576, 692); c.drawString(454, 683, "d. SPONSOR SSN")
+
+    # Row: f. Family Member DOB (YYYYMMDD) | g. Family Member Mailing Address | h. Home Phone
+    grid_box(36, 606, 200, 650); c.drawString(40, 641, "f. FAMILY MEMBER DATE OF BIRTH (YYYYMMDD)")
+    grid_box(200, 606, 430, 650); c.drawString(204, 641, "g. CURRENT FAMILY MEMBER MAILING ADDRESS (Street, City, State, ZIP)")
+    grid_box(430, 606, 576, 650); c.drawString(434, 641, "h. HOME TELEPHONE NUMBER")
+
+    # Row: Sponsor section 3 (must NEVER receive patient or provider values!)
+    grid_box(36, 562, 220, 606); c.drawString(40, 597, "3.a. SPONSOR RANK OR GRADE")
+    grid_box(220, 562, 400, 606); c.drawString(224, 597, "g. SPONSOR'S OFFICIAL E-MAIL ADDRESS")
+    grid_box(400, 562, 576, 606); c.drawString(404, 597, "h. DUTY TELEPHONE NUMBER")
+
+    # Row: Parent/Guardian certification (has its own signature & date — must NOT get provider values or auto-sign!)
+    c.setFont("Helvetica-Bold", 7)
+    c.drawString(40, 546, "PARENT/GUARDIAN OR PERSON OF MAJORITY AGE:")
+    c.setFont("Helvetica", 6)
+    grid_box(36, 502, 230, 542); c.drawString(40, 533, "a. PRINTED NAME")
+    grid_box(230, 502, 440, 542); c.drawString(234, 533, "b. SIGNATURE")
+    grid_box(440, 502, 576, 542); c.drawString(444, 533, "c. DATE (YYYYMMDD)")
+
+    # Row: PART C - PROVIDER INFORMATION (the sole Provider signature -> must auto-select as suggested_signature!)
+    c.setFont("Helvetica-Bold", 8)
+    c.drawString(210, 236, "PART C - PROVIDER INFORMATION")
+    c.setFont("Helvetica", 6)
+    grid_box(36, 190, 250, 230); c.drawString(40, 220, "12.a. PROVIDER PRINTED NAME OR STAMP")
+    grid_box(250, 190, 450, 230); c.drawString(254, 220, "b. SIGNATURE")
+    grid_box(450, 190, 576, 230); c.drawString(454, 220, "c. DATE (YYYYMMDD)")
+    grid_box(36, 148, 160, 190); c.drawString(40, 180, "(1) COMMERCIAL")
+    grid_box(160, 148, 260, 190); c.drawString(164, 180, "(2) DSN (Military only)")
+    grid_box(260, 148, 370, 190); c.drawString(264, 180, "(3) FAX NUMBER")
+    grid_box(370, 148, 576, 190); c.drawString(374, 180, "e. MAILING ADDRESS (Include ZIP Code)")
+    grid_box(36, 106, 370, 148); c.drawString(40, 138, "f. OFFICIAL E-MAIL ADDRESS")
+    c.save()
+
+    model = cac_sign_editor.review_model(str(pdf_path))
+    # Provider signature is auto-selected even though Parent/Guardian also has a signature cell.
+    assert model["suggested_signature"]["label"] == "Provider — b. SIGNATURE"
+    assert any(f["kind"] == "checkbox" and "EFMP REGISTRATION" in f["label"] for f in model["fields"])
+
+    node = shutil.which("node")
+    if not node:
+        return
+    model["autocomplete"] = [
+        {"key": "full_name", "value": "Dr. Signer Example"},
+        {"key": "title", "value": "Staff Physician"},
+        {"key": "duty_phone", "value": "555-555-0199"},
+        {"key": "fax", "value": "555-555-0198"},
+        {"key": "clinic", "value": "Example Clinic, VA 22314"},
+        {"key": "email", "value": "signer@example.org"},
+        {"key": "today_iso_compact", "value": "20261124"},
+        {"key": "today_us", "value": "11/24/2026"},
+    ]
+    clip = (
+        "GENERAL INFORMATION\nFull Name:\nSample, Jordan Taylor\nDate of Birth:\n04/15/2017 00:00:00 CST\n"
+        "Home Address:\n100 EXAMPLE AVE\n\nSPRINGFIELD, IL 627041234\nHome Phone:\n+ 5555550142\n"
+    )
+    html = pathlib.Path(cac_sign_editor.PAGE_HTML).read_text(encoding="utf-8")
+    script_src = re.search(r'<script nonce="\{\{NONCE\}\}">\s*(.*?)\s*</script>', html, re.S).group(1)
+    jsf, mf, cf = tmp_path / "ed.js", tmp_path / "m.json", tmp_path / "c.txt"
+    jsf.write_text(script_src); mf.write_text(json.dumps(model)); cf.write_text(clip)
+    harness = r"""
+const vm = require("node:vm"), fs = require("node:fs");
+const makeEl = () => ({ tagName: "DIV", style: {}, dataset: {}, children: [], hidden: false, disabled: false,
+  classList: { add(){}, remove(){}, toggle(){}, contains(){ return false; } },
+  append(){}, appendChild(x){ return x; }, replaceChildren(){}, setAttribute(){}, addEventListener(){},
+  querySelector(){ return null; }, querySelectorAll(){ return []; }, getBoundingClientRect(){ return { width: 800, height: 24 }; } });
+const els = new Map();
+const ctx = { document: { activeElement: { tagName: "BODY" }, hidden: false, getElementById(id){ if (!els.has(id)) els.set(id, makeEl()); return els.get(id); },
+  createElement: makeEl, createTextNode: (t) => ({ textContent: t }), querySelectorAll: () => [], addEventListener(){} },
+  window: { addEventListener(){}, removeEventListener(){} }, location: { hash: "#t" }, history: { replaceState(){} },
+  sessionStorage: { setItem(){}, getItem(){ return "t"; } }, navigator: {}, URL: { createObjectURL(){ return "b:1"; }, revokeObjectURL(){} },
+  ResizeObserver: class { observe(){} }, fetch: async () => ({ ok: true, status: 200, json: async () => [] }),
+  setInterval: () => 1, clearInterval(){}, setTimeout(){}, requestAnimationFrame(){} };
+vm.createContext(ctx);
+vm.runInContext(fs.readFileSync(process.env.JSF, "utf8") + `
+globalThis.go = (m, c) => {
+  model = m; vals = {}; orig = {}; prop = {}; patient = null; patientApplied = {};
+  for (const f of model.fields) { vals[f.name] = f.value; orig[f.name] = f.value; }
+  applyPatientPaste(c);
+  const ptOnly = { ...changes() };
+  fillAllMatched();
+  return { ptOnly, both: changes(), additions: additions() };
+};`, ctx);
+console.log(JSON.stringify(ctx.go(JSON.parse(fs.readFileSync(process.env.MF, "utf8")), fs.readFileSync(process.env.CF, "utf8"))));
+"""
+    out = json.loads(subprocess.run([node, "-e", harness], env=dict(os.environ, JSF=str(jsf), MF=str(mf), CF=str(cf)), capture_output=True, text=True, check=True).stdout)
+    by_lbl = {f["label"]: f["name"] for f in model["fields"]}
+    pt = {f["label"]: out["ptOnly"].get(f["name"], "") for f in model["fields"]}
+    both = {f["label"]: out["both"].get(f["name"], "") for f in model["fields"]}
+
+    # Patient fields filled accurately (including Last, First and YYYYMMDD):
+    assert pt["2.a. FAMILY MEMBER/PATIENT NAME (Last, First, Middle Initial)"] == "Sample, Jordan Taylor"
+    assert pt["f. FAMILY MEMBER DATE OF BIRTH (YYYYMMDD)"] == "20170415"
+    assert pt["g. CURRENT FAMILY MEMBER MAILING ADDRESS (Street, City, State, ZIP)"] == "100 EXAMPLE AVE, SPRINGFIELD, IL 62704-1234"
+    assert pt["Patient — h. HOME TELEPHONE NUMBER"] == "555-555-0142"
+
+    # Sponsor and Parent/Guardian fields stay completely untouched by BOTH ⌘V and ⌘K:
+    for untouched in (
+        "b. SPONSOR NAME (Last, First, Middle Initial)",
+        "d. SPONSOR SSN",
+        "3.a. SPONSOR RANK OR GRADE",
+        "g. SPONSOR'S OFFICIAL E-MAIL ADDRESS",
+        "Sponsor — h. DUTY TELEPHONE NUMBER",
+        "Parent/Guardian — a. PRINTED NAME",
+        "Parent/Guardian — c. DATE (YYYYMMDD)",
+        "Provider — (2) DSN (Military only)",
+    ):
+        assert both[untouched] == "", (untouched, both[untouched])
+
+    # Provider fields filled by ⌘K:
+    assert both["12.a. PROVIDER PRINTED NAME OR STAMP"] == "Dr. Signer Example"
+    assert both["Provider — c. DATE (YYYYMMDD)"] == "20261124"
+    assert both["Provider — (1) COMMERCIAL"] == "555-555-0199"
+    assert both["Provider — (3) FAX NUMBER"] == "555-555-0198"
+    assert both["Provider — e. MAILING ADDRESS (Include ZIP Code)"] == "Example Clinic, VA 22314"
+    assert both["Provider — f. OFFICIAL E-MAIL ADDRESS"] == "signer@example.org"
+
+    # Verify full sign_direct roundtrip passes 3-reader agreement and visual diff!
+    req = dict(model["suggested_signature"], mode="place", additions=out["additions"], values=out["both"])
+    signed = cac_sign_editor.sign_direct(str(pdf_path), req, ["--p12", certs["supervisor"], "--p12-pass", "test"])
+    assert signed["ok"], signed
+    assert not cac_sign_editor.reader_problems(signed["output"])
+    assert all(s["ok"] for s in verify_signatures(signed["output"]))

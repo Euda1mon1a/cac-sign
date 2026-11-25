@@ -154,6 +154,51 @@ def form_model(path, profiles=None, identity=None):
                 "fields": [], "sign_target": None, "blocked": _refusal(disagree), "notes": []}
 
 
+SAVEABLE_IDENTITY_KEYS = frozenset({
+    "full_name", "title", "duty_phone", "fax", "npi", "dea", "license", "email", "clinic", "unit",
+})
+
+
+def save_identity_updates(updates):
+    """Merge validated signer fields into identity.json (0700 dir, 0600 atomic replace)."""
+    if not isinstance(updates, dict):
+        raise ValueError("updates must be an object")
+    cleaned = {}
+    for raw_k, raw_v in list(updates.items())[:16]:
+        if not isinstance(raw_k, str) or not isinstance(raw_v, str):
+            continue
+        k = raw_k.strip().lower()
+        v = raw_v.strip()
+        if k not in SAVEABLE_IDENTITY_KEYS or not v or len(v) > 120:
+            continue
+        if v.upper() in ("N/A", "NA", "NONE") or any(ord(c) < 32 for c in v):
+            continue
+        if k == "npi":
+            digits = re.sub(r"\D+", "", v)
+            if len(digits) != 10:
+                continue
+            v = digits
+        cleaned[k] = v
+    cur = dict(cac_sign.load_identity())
+    changed = any(cur.get(k) != v for k, v in cleaned.items())
+    if changed and cleaned:
+        cur.update(cleaned)
+        dest = cac_sign.IDENTITY_FILE
+        parent = os.path.dirname(os.path.abspath(dest))
+        os.makedirs(parent, mode=0o700, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(prefix=".identity-", dir=parent)
+        try:
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(cur, f, indent=2)
+                f.write("\n")
+            os.replace(tmp, dest)
+        except Exception:
+            _remove(tmp)
+            raise
+    return _autocomplete_items(cur)
+
+
 def _autocomplete_items(identity):
     """Saved identity values plus today's date formats for explicit click/type-ahead entry."""
     items, seen = [], set()
@@ -164,7 +209,7 @@ def _autocomplete_items(identity):
         if val and val not in seen:
             seen.add(val)
             items.append({"key": key.strip().lower(), "value": val})
-    for key, fmt in (("today", "%d %b %Y"), ("today_us", "%m/%d/%Y")):
+    for key, fmt in (("today", "%d %b %Y"), ("today_us", "%m/%d/%Y"), ("today_iso_compact", "%Y%m%d")):
         val = time.strftime(fmt).upper() if key == "today" else time.strftime(fmt)
         if val not in seen:
             seen.add(val)
@@ -380,8 +425,8 @@ def _add_text_fields(path, additions):
     import math
     from pyhanko.pdf_utils import generic as g
     from pyhanko.pdf_utils.incremental_writer import IncrementalPdfFileWriter
-    if not isinstance(additions, list) or len(additions) > 100:
-        raise ValueError("Add at most 100 text boxes at a time.")
+    if not isinstance(additions, list) or len(additions) > 400:
+        raise ValueError("Add at most 400 text boxes at a time.")
     if verify_signatures(path):
         raise ValueError("Add text boxes before the document has any signatures.")
     geo, _ = page_geometry(path)
@@ -637,8 +682,14 @@ def review_model(path):
         return model
     if fields or signatures:
         model["fields"].extend(fields)
-        if len(signatures) == 1 and not model.get("sign_target"):
-            model["suggested_signature"] = signatures[0]
+        if not model.get("sign_target"):
+            if len(signatures) == 1:
+                model["suggested_signature"] = signatures[0]
+            else:
+                prov = [s for s in signatures
+                        if re.search(r"\b(provider|physician|practitioner|doctor|clinician)\b", s.get("label", ""), re.I)]
+                if len(prov) == 1:
+                    model["suggested_signature"] = prov[0]
         model["notes"] = [*(model.get("notes") or []),
                           f"Detected {len(fields)} fields and {len(signatures)} signature line(s). "
                           "Check their positions and labels; remove any incorrect fields. Checkbox choices start unchecked."]
@@ -789,6 +840,9 @@ class Editor:
                     if u.path == "/api/discard":
                         ed.discard()
                         return self._json({"ok": True})
+                    if u.path == "/api/identity":
+                        ac = save_identity_updates(body.get("updates") or {})
+                        return self._json({"ok": True, "autocomplete": ac})
                     if u.path == "/api/reveal":
                         out = ed.outputs.get(int(body.get("f", 0)))
                         if out and os.path.exists(out):
