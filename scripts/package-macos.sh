@@ -91,17 +91,16 @@ else
   NOTARY_NOTE="signed with Developer ID (notarization not requested)"
 fi
 
-TS_FLAG=()
-if [ "$NO_TIMESTAMP" -eq 1 ]; then TS_FLAG=("--no-timestamp"); fi
-
 APP_BUNDLE="$STAGE/CACSign.app"
-"$PYTHON_EXE" "$SRC_EXPORT/scripts/build_macos_app.py" \
-  "$APP_BUNDLE" \
-  --python "$PYTHON_EXE" \
-  --sign "$SIGN" \
-  --source-commit "$SOURCE" \
-  --notarization-note "$NOTARY_NOTE" \
-  "${TS_FLAG[@]}"
+BUILD_ARGS=(
+  "$APP_BUNDLE"
+  --python "$PYTHON_EXE"
+  --sign "$SIGN"
+  --source-commit "$SOURCE"
+  --notarization-note "$NOTARY_NOTE"
+)
+if [ "$NO_TIMESTAMP" -eq 1 ]; then BUILD_ARGS+=(--no-timestamp); fi
+"$PYTHON_EXE" "$SRC_EXPORT/scripts/build_macos_app.py" "${BUILD_ARGS[@]}"
 
 APP_EXEC="$APP_BUNDLE/Contents/MacOS/CACSign"
 if xcrun nm -u "$APP_EXEC" | grep -Eq 'LanguageModelError|GenerationOptionsV12samplingMode'; then

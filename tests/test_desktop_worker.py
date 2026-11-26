@@ -649,8 +649,10 @@ def test_release_packaging_helpers_and_user_applications_fallback(tmp_path, monk
     ).stdout.strip()
     assert out_user == f"USER_APP_PY:{app_launcher} --help-stub"
 
-    # Verify package-macos.sh syntax and required argument guards
+    # Verify package-macos.sh syntax, bash 3.2 set -u empty-array safety, and required argument guards
     pkg_script = os.path.join(ROOT, "scripts", "package-macos.sh")
+    pkg_text = open(pkg_script, encoding="utf-8").read()
+    assert "=()" not in pkg_text, "macOS /bin/bash 3.2 aborts on empty array expansion under set -u"
     subprocess.run(["/bin/bash", "-n", pkg_script], check=True)
     bad = subprocess.run(["/bin/bash", pkg_script], capture_output=True, text=True)
     assert bad.returncode != 0
