@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import plistlib
 import re
@@ -41,20 +42,36 @@ def run(*args, **kwargs):
     return subprocess.run([str(a) for a in args], check=True, **kwargs)
 
 
-def is_macho(file_path: Path) -> bool:
+def macho_kind(file_path: Path) -> str | None:
+    """Return 'exec' for MH_EXECUTE Mach-Os, 'lib' for dylibs/bundles, or None."""
     if not file_path.is_file() or file_path.is_symlink():
-        return False
+        return None
     try:
         with file_path.open("rb") as f:
-            magic = f.read(4)
-        return magic in (
-            b"\xcf\xfa\xed\xfe",
-            b"\xfe\xed\xfa\xcf",
-            b"\xca\xfe\xba\xbe",
-            b"\xbe\xba\xfe\xca",
-        )
+            hdr = f.read(16)
     except OSError:
-        return False
+        return None
+    if len(hdr) < 16:
+        return None
+    magic = hdr[:4]
+    if magic == b"\xcf\xfa\xed\xfe":
+        filetype = int.from_bytes(hdr[12:16], "little")
+        return "exec" if filetype == 2 else "lib"
+    if magic == b"\xfe\xed\xfa\xcf":
+        filetype = int.from_bytes(hdr[12:16], "big")
+        return "exec" if filetype == 2 else "lib"
+    if magic in (b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca"):
+        return "exec" if file_path.parent.name == "bin" else "lib"
+    return None
+
+
+def verify_macos26_symbol_compat(binary_path: Path) -> None:
+    nm_out = subprocess.check_output(["xcrun", "nm", "-u", str(binary_path)], text=True)
+    if re.search(r"LanguageModelError|GenerationOptionsV12samplingMode", nm_out):
+        raise RuntimeError(
+            "CACSign binary imports macOS 27-only FoundationModels symbols "
+            "(LanguageModelError or GenerationOptions.samplingMode) that fail on macOS 26.x."
+        )
 
 
 def read_project_version() -> str:
@@ -143,7 +160,83 @@ def should_skip_site_entry(name: str) -> bool:
     return any(lower == p or lower.startswith(p + "-") or lower.startswith(p + "_") for p in SKIP_PACKAGES)
 
 
-def build_app(output: Path, python_exe: Path, replace: bool = False) -> None:
+def copy_pruned_python_runtime(base: Path, runtime: Path, py_ver: str) -> None:
+    runtime_bin = runtime / "bin"
+    runtime_bin.mkdir(parents=True, exist_ok=True)
+    src_py = base / f"bin/python{py_ver}"
+    if not src_py.is_file():
+        src_py = base / "bin/python3"
+    dest_py = runtime_bin / f"python{py_ver}"
+    shutil.copyfile(src_py, dest_py)
+    dest_py.chmod(0o755)
+    os.symlink(f"python{py_ver}", runtime_bin / "python3")
+    os.symlink(f"python{py_ver}", runtime_bin / "python")
+
+    if (base / "BUILD").is_file():
+        shutil.copyfile(base / "BUILD", runtime / "BUILD")
+
+    stdlib_ignore = shutil.ignore_patterns(
+        "__pycache__",
+        "*.pyc",
+        ".DS_Store",
+        "test",
+        "tests",
+        "idlelib",
+        "tkinter",
+        "turtledemo",
+        "ensurepip",
+        "venv",
+        "lib2to3",
+        "*.a",
+    )
+    shutil.copytree(base / "lib", runtime / "lib", symlinks=False, ignore=stdlib_ignore)
+
+
+def sign_app_bundle(app: Path, resources_dir: Path, staging: Path, sign_identity: str, use_timestamp: bool) -> None:
+    if sign_identity == "-":
+        for macho_file in sorted(
+            (p for p in resources_dir.rglob("*") if macho_kind(p) is not None),
+            key=lambda p: len(p.parts),
+            reverse=True,
+        ):
+            run("codesign", "--force", "--sign", "-", macho_file, stderr=subprocess.DEVNULL)
+        run("codesign", "--force", "--deep", "--sign", "-", app)
+        run("codesign", "--verify", "--strict", "--deep", app)
+        return
+
+    py_entitlements = staging / "python-entitlements.plist"
+    py_entitlements.write_bytes(
+        plistlib.dumps(
+            {
+                "com.apple.security.cs.allow-unsigned-executable-memory": True,
+                "com.apple.security.cs.disable-library-validation": True,
+            }
+        )
+    )
+    ts_args = ["--timestamp"] if use_timestamp else ["--timestamp=none"]
+
+    nested = [(p, macho_kind(p)) for p in resources_dir.rglob("*")]
+    nested_machos = [(p, k) for p, k in nested if k is not None]
+    for path_item, kind in sorted(nested_machos, key=lambda pk: (pk[1] == "exec", -len(pk[0].parts))):
+        cmd = ["codesign", "--force", *ts_args, "--options", "runtime"]
+        if kind == "exec":
+            cmd += ["--entitlements", str(py_entitlements)]
+        cmd += ["--sign", sign_identity, str(path_item)]
+        run(*cmd)
+
+    run("codesign", "--force", *ts_args, "--options", "runtime", "--sign", sign_identity, app)
+    run("codesign", "--verify", "--strict", "--deep", app)
+
+
+def build_app(
+    output: Path,
+    python_exe: Path,
+    replace: bool = False,
+    sign_identity: str = "-",
+    use_timestamp: bool = True,
+    source_commit_override: str | None = None,
+    notarization_note: str | None = None,
+) -> None:
     if output.suffix != ".app":
         raise ValueError("Output destination must end in .app")
     if (output.exists() or output.is_symlink()) and not replace:
@@ -183,7 +276,7 @@ def build_app(output: Path, python_exe: Path, replace: bool = False) -> None:
 
         ignore = shutil.ignore_patterns("__pycache__", "*.pyc", ".DS_Store")
         runtime = resources_dir / "python"
-        shutil.copytree(base, runtime, symlinks=False, ignore=ignore)
+        copy_pruned_python_runtime(base, runtime, py_ver)
 
         site_dest = runtime / f"lib/python{py_ver}/site-packages"
         site_dest.mkdir(parents=True, exist_ok=True)
@@ -216,6 +309,7 @@ def build_app(output: Path, python_exe: Path, replace: bool = False) -> None:
         )
         if not swift_sources:
             raise ValueError("No Swift app sources found in macos/")
+        main_bin = macos_dir / "CACSign"
         run(
             "xcrun",
             "swiftc",
@@ -223,12 +317,14 @@ def build_app(output: Path, python_exe: Path, replace: bool = False) -> None:
             "-swift-version",
             "5",
             "-O",
+            "-suppress-warnings",
             "-target",
             "arm64-apple-macosx14.0",
             *swift_sources,
             "-o",
-            macos_dir / "CACSign",
+            main_bin,
         )
+        verify_macos26_symbol_compat(main_bin)
 
         build_icon(staging, resources_dir / "CACSign.icns")
         (app / "Contents/Info.plist").write_bytes(plistlib.dumps(make_info_plist(version)))
@@ -238,30 +334,38 @@ def build_app(output: Path, python_exe: Path, replace: bool = False) -> None:
             + swift_sources
             + [ROOT / "macos/MakeIcon.swift", ROOT / "scripts/build_macos_app.py"]
         )
+        if source_commit_override:
+            source_commit = source_commit_override
+            source_dirty = False
+        else:
+            source_commit = subprocess.check_output(["git", "-C", str(ROOT), "rev-parse", "HEAD"], text=True).strip()
+            source_dirty = bool(subprocess.check_output(["git", "-C", str(ROOT), "status", "--porcelain"], text=True))
+
+        signing_desc = (
+            "local ad-hoc; inside-out Mach-O verified"
+            if sign_identity == "-"
+            else f"Developer ID Hardened Runtime ({sign_identity})"
+        )
+        if notarization_note:
+            signing_desc += f"; {notarization_note}"
+
         receipt = {
             "bundle_id": BUNDLE_ID,
             "version": version,
-            "source_commit": subprocess.check_output(["git", "-C", str(ROOT), "rev-parse", "HEAD"], text=True).strip(),
-            "source_dirty": bool(subprocess.check_output(["git", "-C", str(ROOT), "status", "--porcelain"], text=True)),
+            "source_commit": source_commit,
+            "source_dirty": source_dirty,
             "source_sha256": {
                 str(p.relative_to(ROOT)): hashlib.sha256(p.read_bytes()).hexdigest() for p in tracked_sources
             },
             "python_version": py_ver,
             "packages": probe["packages"],
-            "signing": "local ad-hoc; inside-out Mach-O verified",
+            "signing": signing_desc,
             "network": "zero network calls; proxy variables stripped at worker boundary",
         }
         (resources_dir / "bundle-receipt.json").write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
         shutil.copyfile(ROOT / "README.md", resources_dir / "README.md")
 
-        for macho_file in sorted(
-            (p for p in resources_dir.rglob("*") if is_macho(p)),
-            key=lambda p: len(p.parts),
-            reverse=True,
-        ):
-            run("codesign", "--force", "--sign", "-", macho_file, stderr=subprocess.DEVNULL)
-        run("codesign", "--force", "--deep", "--sign", "-", app)
-        run("codesign", "--verify", "--strict", "--deep", app)
+        sign_app_bundle(app, resources_dir, staging, sign_identity=sign_identity, use_timestamp=use_timestamp)
 
         if output.exists() or output.is_symlink():
             old = staging / "old-target.app"
@@ -277,8 +381,20 @@ def main() -> None:
     parser.add_argument("output", type=Path, help="Destination .app path (e.g. build/CACSign.app)")
     parser.add_argument("--python", type=Path, default=default_python(), help="Source venv Python interpreter")
     parser.add_argument("--replace", action="store_true", help="Atomically replace an existing output .app")
+    parser.add_argument("--sign", default="-", help="Code signing identity ('-' for ad-hoc, or Developer ID Application)")
+    parser.add_argument("--no-timestamp", action="store_true", help="Omit RFC 3161 timestamp server call during Developer ID signing")
+    parser.add_argument("--source-commit", default=None, help="Explicit git commit SHA when building from git archive")
+    parser.add_argument("--notarization-note", default=None, help="Optional notarization note recorded in bundle-receipt.json")
     args = parser.parse_args()
-    build_app(args.output.expanduser().absolute(), args.python.expanduser().absolute(), replace=args.replace)
+    build_app(
+        args.output.expanduser().absolute(),
+        args.python.expanduser().absolute(),
+        replace=args.replace,
+        sign_identity=args.sign,
+        use_timestamp=not args.no_timestamp,
+        source_commit_override=args.source_commit,
+        notarization_note=args.notarization_note,
+    )
 
 
 if __name__ == "__main__":

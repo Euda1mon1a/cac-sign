@@ -8,7 +8,11 @@
 # macOS asks for the PIN in its own smart-card window; this tool never sees it.
 cac-sign() {
   local dir="${CAC_SIGN_HOME:-$HOME/.cac-sign}"
-  local app_bundle="${CAC_SIGN_APP:-/Applications/CACSign.app}"
+  local sys_app="${CAC_SIGN_SYSTEM_APP:-/Applications/CACSign.app}"
+  local app_bundle="${CAC_SIGN_APP:-$sys_app}"
+  if [[ ! -d "$app_bundle" && -z "${CAC_SIGN_APP:-}" && -d "$HOME/Applications/CACSign.app" ]]; then
+    app_bundle="$HOME/Applications/CACSign.app"
+  fi
   local app_py="$app_bundle/Contents/Resources/python/bin/python3"
   local app_launcher="$app_bundle/Contents/Resources/app/cac_sign_launch.py"
   if [[ -x "$dir/.venv/bin/python" ]]; then

@@ -30,12 +30,15 @@ def _modules():
 def _desktop_app_path():
     if os.environ.get("CAC_SIGN_FORCE_WEB") == "1":
         return None
-    app = os.environ.get("CAC_SIGN_APP") or DESKTOP_APP
-    if ("PYTEST_CURRENT_TEST" in os.environ
-            and app == "/Applications/CACSign.app"
-            and not os.environ.get("CAC_SIGN_APP")):
+    explicit = os.environ.get("CAC_SIGN_APP")
+    if explicit:
+        return explicit if os.path.isdir(explicit) else None
+    if "PYTEST_CURRENT_TEST" in os.environ and DESKTOP_APP == "/Applications/CACSign.app":
         return None
-    return app if os.path.isdir(app) else None
+    for candidate in (DESKTOP_APP, os.path.expanduser("~/Applications/CACSign.app")):
+        if os.path.isdir(candidate):
+            return candidate
+    return None
 
 
 def cli(argv=None):
