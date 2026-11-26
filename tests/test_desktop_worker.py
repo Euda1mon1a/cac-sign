@@ -617,6 +617,12 @@ def test_release_packaging_helpers_and_user_applications_fallback(tmp_path, monk
     assert builder.macho_kind(dylib_bin) == "lib"
     assert builder.macho_kind(plain_txt) is None
 
+    # MH_DSYM (filetype 10) and PyObjCTest must be excluded so Apple notarization never sees .dSYM bundles
+    dsym_bin = tmp_path / "debug.dSYM_dwarf"
+    dsym_bin.write_bytes(b"\xcf\xfa\xed\xfe" + b"\x00" * 8 + (10).to_bytes(4, "little") + b"\x00" * 16)
+    assert builder.macho_kind(dsym_bin) is None
+    assert builder.should_skip_site_entry("PyObjCTest") is True
+
     # Verify ~/Applications/CACSign.app fallback when /Applications/CACSign.app is absent
     fake_home = tmp_path / "user-home"
     user_app = fake_home / "Applications" / "CACSign.app"
