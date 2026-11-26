@@ -35,7 +35,7 @@ APP_MODULES = (
     "field_detection.py",
     "identity.example.json",
 )
-SKIP_PACKAGES = ("pytest", "_pytest", "pluggy", "iniconfig", "pip", "setuptools", "wheel")
+SKIP_PACKAGES = ("pytest", "_pytest", "pluggy", "iniconfig", "pip", "setuptools", "wheel", "pyobjctest")
 
 
 def run(*args, **kwargs):
@@ -43,7 +43,7 @@ def run(*args, **kwargs):
 
 
 def macho_kind(file_path: Path) -> str | None:
-    """Return 'exec' for MH_EXECUTE Mach-Os, 'lib' for dylibs/bundles, or None."""
+    """Return 'exec' for MH_EXECUTE (2), 'lib' for MH_DYLIB/MH_BUNDLE (6, 8), or None."""
     if not file_path.is_file() or file_path.is_symlink():
         return None
     try:
@@ -56,10 +56,10 @@ def macho_kind(file_path: Path) -> str | None:
     magic = hdr[:4]
     if magic == b"\xcf\xfa\xed\xfe":
         filetype = int.from_bytes(hdr[12:16], "little")
-        return "exec" if filetype == 2 else "lib"
+        return "exec" if filetype == 2 else ("lib" if filetype in (6, 8) else None)
     if magic == b"\xfe\xed\xfa\xcf":
         filetype = int.from_bytes(hdr[12:16], "big")
-        return "exec" if filetype == 2 else "lib"
+        return "exec" if filetype == 2 else ("lib" if filetype in (6, 8) else None)
     if magic in (b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca"):
         return "exec" if file_path.parent.name == "bin" else "lib"
     return None
@@ -179,6 +179,7 @@ def copy_pruned_python_runtime(base: Path, runtime: Path, py_ver: str) -> None:
         "__pycache__",
         "*.pyc",
         ".DS_Store",
+        "*.dSYM",
         "test",
         "tests",
         "idlelib",
@@ -188,6 +189,13 @@ def copy_pruned_python_runtime(base: Path, runtime: Path, py_ver: str) -> None:
         "venv",
         "lib2to3",
         "*.a",
+        "libtcl*",
+        "libtk*",
+        "tcl*",
+        "tk*",
+        "itcl*",
+        "thread*",
+        "_tkinter*",
     )
     shutil.copytree(base / "lib", runtime / "lib", symlinks=False, ignore=stdlib_ignore)
 
@@ -274,7 +282,7 @@ def build_app(
         resources_dir.mkdir(parents=True)
         app_code_dir.mkdir(parents=True)
 
-        ignore = shutil.ignore_patterns("__pycache__", "*.pyc", ".DS_Store")
+        ignore = shutil.ignore_patterns("__pycache__", "*.pyc", ".DS_Store", "*.dSYM")
         runtime = resources_dir / "python"
         copy_pruned_python_runtime(base, runtime, py_ver)
 
@@ -288,6 +296,10 @@ def build_app(
                 shutil.copytree(src, target, dirs_exist_ok=True, symlinks=False, ignore=ignore)
             else:
                 shutil.copyfile(src, target)
+
+        stray_dsyms = list(resources_dir.rglob("*.dSYM"))
+        if stray_dsyms:
+            raise RuntimeError(f"Unsealed .dSYM bundle(s) remained in Resources: {stray_dsyms[:3]}")
 
         for mod in APP_MODULES:
             shutil.copyfile(ROOT / mod, app_code_dir / mod)

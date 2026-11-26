@@ -138,11 +138,27 @@ with open(out, "w", encoding="utf-8") as fh:
 PY
 }
 
+notarize_and_verify() {
+  local target_file="$1"
+  local submit_json="$STAGE/notary-submit-$$.json"
+  xcrun notarytool submit "$target_file" --keychain-profile "$NOTARY_PROFILE" --wait --output-format json > "$submit_json"
+  local sub_id sub_status
+  sub_id="$("$PYTHON_EXE" -c 'import json,sys; print(json.load(open(sys.argv[1])).get("id",""))' "$submit_json")"
+  sub_status="$("$PYTHON_EXE" -c 'import json,sys; print(json.load(open(sys.argv[1])).get("status",""))' "$submit_json")"
+  printf 'Notarization submission %s (%s): %s\n' "$sub_id" "$(basename "$target_file")" "$sub_status"
+  if [ "$sub_status" != "Accepted" ]; then
+    if [ -n "$sub_id" ]; then
+      xcrun notarytool log "$sub_id" --keychain-profile "$NOTARY_PROFILE" >&2 || true
+    fi
+    fail "Apple notarization did not accept $(basename "$target_file") (status: $sub_status)."
+  fi
+}
+
 APP_NOTARIZED="false"
 if [ -n "$NOTARY_PROFILE" ]; then
   NOTARY_ZIP="$STAGE/CACSign-notary-upload.zip"
   /usr/bin/ditto -c -k --sequesterRsrc --keepParent "$APP_BUNDLE" "$NOTARY_ZIP"
-  xcrun notarytool submit "$NOTARY_ZIP" --keychain-profile "$NOTARY_PROFILE" --wait
+  notarize_and_verify "$NOTARY_ZIP"
   rm -f "$NOTARY_ZIP"
   xcrun stapler staple "$APP_BUNDLE"
   xcrun stapler validate "$APP_BUNDLE"
@@ -207,7 +223,7 @@ EOF
 <?xml version="1.0" encoding="utf-8"?>
 <installer-gui-script minSpecVersion="2">
   <title>CACSign</title>
-  <domains enable_anywhere="false" enable_currentUserHome="true" enable_localSystem="true"/>
+  <domains enable_anywhere="false" enable_currentUserHome="true" enable_localSystem="false"/>
   <options customize="never" require-scripts="false" hostArchitectures="arm64"/>
   <welcome file="welcome.html" mime-type="text/html"/>
   <conclusion file="conclusion.html" mime-type="text/html"/>
@@ -225,8 +241,30 @@ EOF
 </installer-gui-script>
 EOF
 
+  cat > "$STAGE/component.plist" <<'EOF'
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<array>
+  <dict>
+    <key>BundleHasStrictIdentifier</key>
+    <true/>
+    <key>BundleIsRelocatable</key>
+    <false/>
+    <key>BundleIsVersionChecked</key>
+    <false/>
+    <key>BundleOverwriteAction</key>
+    <string>upgrade</string>
+    <key>RootRelativeBundlePath</key>
+    <string>CACSign.app</string>
+  </dict>
+</array>
+</plist>
+EOF
+
   /usr/bin/pkgbuild \
     --root "$PKG_ROOT" \
+    --component-plist "$STAGE/component.plist" \
     --identifier "com.aaronmontgomery.cacsign.pkg" \
     --version "$VERSION" \
     --ownership recommended \
@@ -245,7 +283,7 @@ EOF
 
   /usr/sbin/pkgutil --check-signature "$pkg_path"
   if [ -n "$NOTARY_PROFILE" ]; then
-    xcrun notarytool submit "$pkg_path" --keychain-profile "$NOTARY_PROFILE" --wait
+    notarize_and_verify "$pkg_path"
     xcrun stapler staple "$pkg_path"
     xcrun stapler validate "$pkg_path"
     /usr/sbin/spctl --assess --type install --verbose "$pkg_path"
