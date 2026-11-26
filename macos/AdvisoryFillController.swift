@@ -134,10 +134,12 @@ public enum AdvisoryFillController {
             """
 
             let session = LanguageModelSession(instructions: instructions)
+            // Note: Explicitly pass sampling: nil so macOS 27 SDK binds to macOS 26.0's
+            // init(sampling:temperature:maximumResponseTokens:) instead of 27-only init(samplingMode:...).
             let response = try await session.respond(
                 to: prompt,
                 generating: ClinicalAdvisoryBatch.self,
-                options: GenerationOptions(temperature: 0.1, maximumResponseTokens: 700)
+                options: GenerationOptions(sampling: nil, temperature: 0.1, maximumResponseTokens: 700)
             )
             let raw = response.content.items.map {
                 (fieldName: $0.fieldName, suggestedText: $0.suggestedText, source: $0.evidence)

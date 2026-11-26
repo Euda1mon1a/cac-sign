@@ -28,20 +28,29 @@ clean place.
    changes only through pull requests.
 4. **Tag** the merge: create a GitHub release `vX.Y.Z` on `main`. Release tags can't be moved
    or deleted.
-5. **Build from a clean copy of the tag:**
+5. **Build the signed & notarized macOS `.pkg` / `.zip` release artifacts:**
+   ```sh
+   ./scripts/package-macos.sh \
+     --sign "Developer ID Application: <Name> (<TeamID>)" \
+     --notary-profile "<notarytool-keychain-profile>" \
+     --output ~/Downloads/CACSign/CACSign-apple.zip \
+     --pkg-output ~/Downloads/CACSign/CACSign-apple.pkg
+   ```
+   This exports `git archive HEAD`, builds `CACSign.app` with Hardened Runtime + macOS 26/27 symbol-compatibility checks (`xcrun nm -u`), notarizes and staples both `CACSign.app` and `CACSign-apple.pkg`, verifies `spctl --assess`, and writes `CACSign-apple.latest.json` with SHA-256 digests. Attach `CACSign-apple.pkg`, `CACSign-apple.zip`, and `CACSign-apple.latest.json` to the GitHub release.
+6. **Build the Python sdist/wheel from a clean copy of the tag:**
    `git archive vX.Y.Z | tar -x -C <empty dir> && cd <that dir> && uv build`.
    The sdist should list the same files as `git ls-files`, plus `PKG-INFO` and minus `AGENTS.md`.
    Check that no user documents, local test output, identities or signing material
    are included. Keep built artifacts and validation receipts outside the checkout.
-6. **Publish to PyPI:** `uv publish dist/*`.
-7. **Check PyPI.** Run `scripts/test-uv-install.sh <new scratch dir> cac-sign==X.Y.Z`. PyPI's
+7. **Publish to PyPI:** `uv publish dist/*`.
+8. **Check PyPI.** Run `scripts/test-uv-install.sh <new scratch dir> cac-sign==X.Y.Z`. PyPI's
    index can lag a minute; `UVFLAGS="--refresh-package cac-sign"` gets past a cached miss.
-8. **Homebrew.** In `Euda1mon1a/homebrew-tap`, run
+9. **Homebrew.** In `Euda1mon1a/homebrew-tap`, run
    `.github/scripts/cac_sign_formula.py <cac-sign checkout at the tag> X.Y.Z Formula/cac-sign.rb`
    and open a pull request. The formula installs the exact wheels in `uv.lock`, so regenerate
    it whenever the lock changes. The tap's CI must pass: build, `brew test`, audit. After the
    merge, its `user-install` job must also pass; it runs `brew install` as a user would.
-9. **Check the curl installer** from the tag, in a scratch home:
+10. **Check the curl installer** from the tag, in a scratch home:
    `curl -fsSL https://raw.githubusercontent.com/Euda1mon1a/cac-sign/vX.Y.Z/install.sh | env HOME=<scratch> bash`.
 
 The macOS PIN prompt and owner-entered form values remain owner actions. Synthetic

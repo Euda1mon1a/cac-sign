@@ -594,3 +594,58 @@ def test_zsh_wrapper_resolution_order(tmp_path):
         check=True,
     ).stdout.strip()
     assert out_dev == f"DEV_VENV:{fake_home / 'cac_sign_launch.py'} --version-check"
+
+
+def test_release_packaging_helpers_and_user_applications_fallback(tmp_path, monkeypatch):
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "build_macos_app", os.path.join(ROOT, "scripts", "build_macos_app.py")
+    )
+    builder = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(builder)
+
+    # Verify Mach-O filetype classification (MH_EXECUTE=2 vs MH_DYLIB=6 vs non-Mach-O)
+    exec_bin = tmp_path / "exec_macho"
+    exec_bin.write_bytes(b"\xcf\xfa\xed\xfe" + b"\x00" * 8 + (2).to_bytes(4, "little") + b"\x00" * 16)
+    dylib_bin = tmp_path / "lib.dylib"
+    dylib_bin.write_bytes(b"\xcf\xfa\xed\xfe" + b"\x00" * 8 + (6).to_bytes(4, "little") + b"\x00" * 16)
+    plain_txt = tmp_path / "note.txt"
+    plain_txt.write_text("not a macho\n", encoding="utf-8")
+
+    assert builder.macho_kind(exec_bin) == "exec"
+    assert builder.macho_kind(dylib_bin) == "lib"
+    assert builder.macho_kind(plain_txt) is None
+
+    # Verify ~/Applications/CACSign.app fallback when /Applications/CACSign.app is absent
+    fake_home = tmp_path / "user-home"
+    user_app = fake_home / "Applications" / "CACSign.app"
+    (user_app / "Contents" / "Resources" / "python" / "bin").mkdir(parents=True)
+    (user_app / "Contents" / "Resources" / "app").mkdir(parents=True)
+    app_py = user_app / "Contents" / "Resources" / "python" / "bin" / "python3"
+    app_launcher = user_app / "Contents" / "Resources" / "app" / "cac_sign_launch.py"
+    app_py.write_text("#!/bin/sh\necho \"USER_APP_PY:$@\"\n", encoding="utf-8")
+    app_py.chmod(0o755)
+    app_launcher.write_text("# stub\n", encoding="utf-8")
+
+    zsh_file = os.path.join(ROOT, "cac-sign.zsh")
+    out_user = subprocess.run(
+        ["/bin/zsh", "-c", f'source "{zsh_file}" && cac-sign --help-stub'],
+        env={
+            "HOME": str(fake_home),
+            "PATH": "/usr/bin:/bin",
+            "CAC_SIGN_HOME": str(fake_home / ".cac-sign"),
+            "CAC_SIGN_SYSTEM_APP": str(tmp_path / "absent-system-CACSign.app"),
+        },
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert out_user == f"USER_APP_PY:{app_launcher} --help-stub"
+
+    # Verify package-macos.sh syntax and required argument guards
+    pkg_script = os.path.join(ROOT, "scripts", "package-macos.sh")
+    subprocess.run(["/bin/bash", "-n", pkg_script], check=True)
+    bad = subprocess.run(["/bin/bash", pkg_script], capture_output=True, text=True)
+    assert bad.returncode != 0
+    assert "Developer ID Application" in bad.stderr
